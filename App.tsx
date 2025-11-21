@@ -196,7 +196,7 @@ const App: React.FC = () => {
       setSheetModalOpen(false);
       setIsProcessing(true);
       setProgress(0);
-      setProgressText("Mapeando dados (Turbo)...");
+      setProgressText("Mapeando dados...");
 
       setTimeout(() => {
           try {
@@ -387,12 +387,12 @@ const App: React.FC = () => {
           return filteredRow;
       });
 
-      const fname = `Relatorio_${new Date().toLocaleDateString('pt-BR').replace(/\//g,'-')}`;
+      const fname = `JustReport_${new Date().toLocaleDateString('pt-BR').replace(/\//g,'-')}`;
 
       if (exportType === 'pdf') {
           const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
           doc.setFontSize(8);
-          doc.text("Relatório Exportado", 14, 10);
+          doc.text("Just Report", 14, 10);
           const head = [Object.keys(exportData[0])];
           const body = exportData.map(Object.values);
           autoTable(doc, {
