@@ -1,0 +1,5 @@
+{
+  "name": "Relatório Turbo Cloud",
+  "description": "A modern, high-performance React application for indexing reports, monitoring SDS status, and mapping deployment data directly in the browser.",
+  "requestFramePermissions": []
+}
