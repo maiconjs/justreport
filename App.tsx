@@ -457,7 +457,7 @@ const App: React.FC = () => {
         <div className="flex flex-col md:flex-row justify-between items-center gap-2">
            <div className="flex items-center gap-4">
                <h1 className="text-xl font-extrabold text-gray-800 tracking-tight bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-                   Relatório Turbo
+                   Just Report
                </h1>
                <div className="flex items-center bg-gray-100 rounded-md p-1 border border-gray-200 gap-1">
                    <button onClick={() => handleExportClick('csv')} disabled={!allData.length} className="px-2 py-1 text-xs font-bold bg-white border rounded hover:text-green-600 disabled:opacity-50 transition">CSV</button>
