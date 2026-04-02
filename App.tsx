@@ -1,17 +1,54 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { ReportItem, SdsInfo, MapInfo, FilterState, MapColumnConfig } from './types';
-import { readExcelFile, processReportData, parseMapWorkbook, processMapSheet, mapColumnsConfig } from './services/excelService';
+import { ReportItem, SdsInfo, NddInfo, MapInfo, FilterState, MapColumnConfig, ColumnDef } from './types';
+import { readExcelFile, readNddCsv, processReportData, parseMapWorkbook, processMapSheet, mapColumnsConfig } from './services/excelService';
 import { parseDateRobust } from './utils/dateUtils';
 import { Modal } from './components/Modal';
 import { ProgressBar } from './components/ProgressBar';
+import { useDebounce } from './hooks/useDebounce';
+
+// Initial Column Definitions
+const INITIAL_COLUMNS: ColumnDef[] = [
+  // SDS
+  { id: 'mon', label: 'Monitoramento', visible: true, type: 'sds', key: 'status' },
+  { id: 'lastUpdate', label: 'Ult. Atualização', visible: true, type: 'sds', key: 'lastUpdate' },
+  { id: 'detection', label: 'Data Detecção', visible: true, type: 'sds', key: 'detection' },
+  // NDD MPS
+  { id: 'nddMon', label: 'Monitoramento MPS', visible: true, type: 'ndd', key: 'status' },
+  { id: 'nddLastUpdate', label: 'Ult. Leitura MPS', visible: true, type: 'ndd', key: 'lastUpdate' },
+  { id: 'nddDays', label: 'Dias s/ Contador MPS', visible: true, type: 'ndd', key: 'daysWithoutMeters' },
+  { id: 'nddAccounting', label: 'Contabilização MPS', visible: true, type: 'ndd', key: 'accountingStatus' },
+  { id: 'nddConnectionType', label: 'Conexão MPS', visible: true, type: 'ndd', key: 'connectionType' },
+  { id: 'nddMpsIp', label: 'IP MPS', visible: true, type: 'ndd', key: 'mpsIp' },
+  // Map (Generated from config)
+  ...mapColumnsConfig.map(c => ({ id: `map_${c.key}`, label: c.label, visible: true, type: 'map', key: c.key } as ColumnDef)),
+  // Standard
+  { id: 'dataCriacao', label: 'Data Criação', visible: true, type: 'standard', key: 'dataCriacao' },
+  { id: 'dataConclusao', label: 'Data Conclusão', visible: true, type: 'standard', key: 'dataConclusao' },
+  { id: 'os', label: 'OS', visible: true, type: 'standard', key: 'os' },
+  { id: 'idOsCorp', label: 'ID OS Corp', visible: true, type: 'standard', key: 'idOsCorp' },
+  { id: 'tipo', label: 'Tipo', visible: true, type: 'standard', key: 'tipo' },
+  { id: 'statusOs', label: 'Status OS', visible: true, type: 'standard', key: 'statusOs' },
+  { id: 'contrato', label: 'Contrato', visible: true, type: 'standard', key: 'contrato' },
+  { id: 'serie', label: 'Série', visible: true, type: 'standard', key: 'serie' },
+  { id: 'situacaoEquip', label: 'Situação Equip.', visible: true, type: 'standard', key: 'situacaoEquip' },
+  { id: 'equipProduzindo', label: 'Produzindo', visible: true, type: 'standard', key: 'equipProduzindo' },
+  { id: 'tipoConexao', label: 'Tipo Conexão', visible: true, type: 'standard', key: 'tipoConexao' },
+  { id: 'ip', label: 'IP', visible: true, type: 'standard', key: 'ip' },
+  { id: 'hostname', label: 'Hostname', visible: true, type: 'standard', key: 'hostname' },
+  { id: 'bairro', label: 'Bairro', visible: true, type: 'standard', key: 'bairro' },
+  { id: 'cidade', label: 'Cidade', visible: true, type: 'standard', key: 'cidade' },
+  { id: 'filial', label: 'Filial', visible: true, type: 'standard', key: 'filial' },
+  { id: 'origem', label: 'Origem', visible: true, type: 'standard', key: 'origem' },
+];
 
 const App: React.FC = () => {
   // State
   const [allData, setAllData] = useState<ReportItem[]>([]);
   const [sdsData, setSdsData] = useState<Map<string, { rawLastUpdate: Date | null, rawDetection: Date | null }>>(new Map());
+  const [nddData, setNddData] = useState<Map<string, { status: string, lastUpdate: string, daysWithoutMeters: string, rawLastUpdate: Date | null, accountingStatus: string, connectionType: string, mpsIp: string }>>(new Map());
   const [mapData, setMapData] = useState<Map<string, MapInfo>>(new Map());
   
   const [isProcessing, setIsProcessing] = useState(false);
@@ -21,13 +58,26 @@ const App: React.FC = () => {
   // UI State
   const [sheetModalOpen, setSheetModalOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [columnModalOpen, setColumnModalOpen] = useState(false);
+  
   const [mapWorkbook, setMapWorkbook] = useState<XLSX.WorkBook | null>(null);
   const [mapSheetNames, setMapSheetNames] = useState<string[]>([]);
   const [selectedSheet, setSelectedSheet] = useState<string | null>(null);
   const [manualHeaderRow, setManualHeaderRow] = useState<string>('');
+  
+  // Export State
   const [exportType, setExportType] = useState<'csv' | 'xlsx' | 'pdf' | null>(null);
+  const [exportCols, setExportCols] = useState<string[]>([]);
+  
+  // PDF Customization State
+  const [pdfTitle, setPdfTitle] = useState("Just Report");
+  const [pdfObservation, setPdfObservation] = useState("");
+  const [pdfLogo, setPdfLogo] = useState<string | null>(null);
+  
+  // Table Columns State
+  const [columns, setColumns] = useState<ColumnDef[]>(INITIAL_COLUMNS);
 
-  // Filter State
+  // Filter State (Immediate UI)
   const [filters, setFilters] = useState<FilterState>({
     search: '',
     searchField: 'all',
@@ -42,8 +92,12 @@ const App: React.FC = () => {
     selectedStatus: [],
     selectedSituacao: [],
     selectedConexao: [],
-    selectedMon: []
+    selectedMon: [],
+    selectedNddMon: []
   });
+
+  // Debounce the filters to avoid heavy calculation on every keystroke
+  const debouncedFilters = useDebounce(filters, 400);
 
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
@@ -52,10 +106,16 @@ const App: React.FC = () => {
   const folderInputRef = useRef<HTMLInputElement>(null);
   const sdsInputRef = useRef<HTMLInputElement>(null);
   const mapInputRef = useRef<HTMLInputElement>(null);
+  const nddInputRef = useRef<HTMLInputElement>(null);
 
-  // --- Helpers ---
+  // --- Effects ---
+  useEffect(() => {
+    document.title = "Just Report";
+  }, []);
 
-  const getSdsInfo = (serial: string): SdsInfo => {
+  // --- Helpers (Memoized to avoid recreation) ---
+
+  const getSdsInfo = useCallback((serial: string): SdsInfo => {
     const empty = { status: '-', colorClass: '', lastUpdate: '-', detection: '-', rawLastUpdate: null, rawDetection: null } as SdsInfo;
     if (sdsData.size === 0 || !serial || serial === '-') return empty;
     
@@ -79,9 +139,34 @@ const App: React.FC = () => {
     if (diffDays > filters.alertDays) return { status: 'Alerta', colorClass: 'bg-yellow-100 text-yellow-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
     
     return { status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
-  };
+  }, [sdsData, filters.offlineDays, filters.alertDays]);
 
-  const getMapInfo = (serial: string): MapInfo => {
+  const getNddInfo = useCallback((serial: string): NddInfo => {
+    const empty = { status: '-', colorClass: '', lastUpdate: '-', daysWithoutMeters: '-', rawLastUpdate: null, accountingStatus: '-', connectionType: '-', mpsIp: '-' } as NddInfo;
+    if (nddData.size === 0 || !serial || serial === '-') return empty;
+
+    const key = String(serial).trim().toUpperCase();
+    const record = nddData.get(key);
+
+    if (!record) {
+      return { ...empty, status: 'Não Monitorado', colorClass: 'bg-red-100 text-red-800 font-semibold' };
+    }
+
+    const { status, lastUpdate, daysWithoutMeters, rawLastUpdate, accountingStatus, connectionType, mpsIp } = record;
+    const days = parseInt(daysWithoutMeters) || 0;
+    const extras = { accountingStatus, connectionType, mpsIp };
+
+    if (days > filters.offlineDays || status === 'NoMonitoringData') {
+        return { status: 'Não Monitorado', colorClass: 'bg-red-100 text-red-800 font-semibold', lastUpdate, daysWithoutMeters, rawLastUpdate, ...extras };
+    }
+    if (days > filters.alertDays || status === 'RedEvent') {
+        return { status: 'Alerta', colorClass: 'bg-yellow-100 text-yellow-800 font-semibold', lastUpdate, daysWithoutMeters, rawLastUpdate, ...extras };
+    }
+
+    return { status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, daysWithoutMeters, rawLastUpdate, ...extras };
+  }, [nddData, filters.offlineDays, filters.alertDays]);
+
+  const getMapInfo = useCallback((serial: string): MapInfo => {
     if (mapData.size === 0 || !serial || serial === '-') {
       const empty: any = {};
       mapColumnsConfig.forEach(c => empty[c.key] = '-');
@@ -89,7 +174,7 @@ const App: React.FC = () => {
     }
     const key = String(serial).trim().toUpperCase();
     return mapData.get(key) || mapColumnsConfig.reduce((acc, col) => ({...acc, [col.key]: 'N/A'}), {} as MapInfo);
-  };
+  }, [mapData]);
 
   // --- Handlers ---
 
@@ -105,7 +190,6 @@ const App: React.FC = () => {
     let processed = 0;
     const newData: ReportItem[] = [];
 
-    // Process in chunks to not freeze UI
     const chunkSize = 5;
     for (let i = 0; i < files.length; i += chunkSize) {
         const chunk = files.slice(i, i + chunkSize);
@@ -121,7 +205,6 @@ const App: React.FC = () => {
         processed += chunk.length;
         setProgress(Math.round((processed / files.length) * 100));
         setProgressText(`Processados ${processed} de ${files.length} arquivos...`);
-        // Small delay to allow UI update
         await new Promise(r => setTimeout(r, 10));
     }
 
@@ -140,7 +223,6 @@ const App: React.FC = () => {
         const newSdsData = new Map();
         
         raw.forEach((row: any) => {
-             // Helper to find keys case-insensitive
              const findVal = (keys: string[]) => {
                 for (const k of keys) {
                     if (row[k]) return row[k];
@@ -170,6 +252,70 @@ const App: React.FC = () => {
     } finally {
         setIsProcessing(false);
         if(sdsInputRef.current) sdsInputRef.current.value = '';
+    }
+  };
+
+  const handleNddSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || !e.target.files[0]) return;
+    setIsProcessing(true);
+    setProgressText("Lendo base NDD MPS...");
+    
+    try {
+        const raw = await readNddCsv(e.target.files[0]);
+        const newNddData = new Map();
+        
+        raw.forEach((row: any) => {
+             const findVal = (keys: string[]) => {
+                for (const k of keys) {
+                    if (row[k] !== undefined && row[k] !== null && row[k] !== "") return row[k];
+                    const upperK = k.toUpperCase();
+                    const match = Object.keys(row).find(rk => rk.trim().toUpperCase() === upperK);
+                    if (match && row[match] !== undefined && row[match] !== null && row[match] !== "") return row[match];
+                }
+                return null;
+             };
+
+             const serial = findVal(['Serial', 'Número de Série', 'Nº Série', 'Série', 'Numero de serie']);
+             const lastUpdate = findVal(['Last meter', 'Última leitura', 'Ultima leitura', 'Data Leitura', 'Ultimo medidor']);
+             const alertsStatus = findVal(['Alerts status', 'Status de Alerta', 'Status Alerta', 'Status de alertas']);
+             const daysWithoutMeters = findVal(['Days without meters', 'Dias sem medidores', 'Dias sem leitura', 'Dias sem contadores']);
+             const accountingStatusRaw = findVal(['Accounting status', 'Status Contabilização', 'Billing Status', 'Accounting Status']);
+             const connectionTypeRaw = findVal(['Connection type', 'Tipo Conexão', 'Tipo de Conexão', 'Connection Type']);
+             const mpsIpRaw = findVal(["Printer's address", "Printers address", 'IP Impressora', 'Endereco Impressora']);
+
+             const accountingStatusMap: Record<string, string> = {
+                 'BillingEnabled': 'Bilhetagem Ativa',
+                 'NoBillingRecently': 'Sem Bilhetagem Recente',
+                 'NoBillingData': 'Nunca Bilhetado',
+             };
+             const connectionTypeMap: Record<string, string> = {
+                 'Network': 'Rede',
+                 'Local': 'USB/Local',
+             };
+             const rawAccounting = String(accountingStatusRaw || '');
+             const rawConnection = String(connectionTypeRaw || '');
+
+             if (serial) {
+                 const key = String(serial).trim().toUpperCase();
+                 newNddData.set(key, {
+                     status: String(alertsStatus || 'Unknown'),
+                     lastUpdate: String(lastUpdate || '-'),
+                     daysWithoutMeters: String(daysWithoutMeters || '0'),
+                     rawLastUpdate: parseDateRobust(lastUpdate),
+                     accountingStatus: accountingStatusMap[rawAccounting] || rawAccounting || '-',
+                     connectionType: connectionTypeMap[rawConnection] || rawConnection || '-',
+                     mpsIp: String(mpsIpRaw || '-'),
+                 });
+             }
+        });
+        setNddData(newNddData);
+        alert(`Base NDD carregada: ${newNddData.size} registros.`);
+    } catch (err) {
+        alert("Erro ao ler arquivo NDD");
+        console.error(err);
+    } finally {
+        setIsProcessing(false);
+        if(nddInputRef.current) nddInputRef.current.value = '';
     }
   };
 
@@ -241,15 +387,42 @@ const App: React.FC = () => {
           status: new Set<string>(),
           situacao: new Set<string>(),
           conexao: new Set<string>(),
-          mon: new Set<string>()
+          mon: new Set<string>(),
+          nddMon: new Set<string>()
       };
+      
+      const now = new Date();
+
       allData.forEach(item => {
           if (item.tipo) sets.tipo.add(item.tipo);
           if (item.equipProduzindo) sets.prod.add(item.equipProduzindo);
           if (item.statusOs) sets.status.add(item.statusOs);
           if (item.situacaoEquip) sets.situacao.add(item.situacaoEquip);
           if (item.tipoConexao) sets.conexao.add(item.tipoConexao);
-          sets.mon.add(getSdsInfo(item.serie).status);
+          
+          let status = '-';
+          const key = String(item.serie).trim().toUpperCase();
+          const record = sdsData.get(key);
+          if (!record) status = 'Não Monitorado';
+          else if (!record.rawLastUpdate) status = 'Dados Incompletos';
+          else {
+              const diffDays = Math.ceil(Math.abs(now.getTime() - record.rawLastUpdate.getTime()) / (1000 * 60 * 60 * 24));
+              if (diffDays > filters.offlineDays) status = 'Não Monitorado';
+              else if (diffDays > filters.alertDays) status = 'Alerta';
+              else status = 'Monitorado';
+          }
+          sets.mon.add(status);
+
+          let nddStatus = '-';
+          const nddRecord = nddData.get(key);
+          if (!nddRecord) nddStatus = 'Não Monitorado';
+          else {
+              const days = parseInt(nddRecord.daysWithoutMeters) || 0;
+              if (days > filters.offlineDays || nddRecord.status === 'NoMonitoringData') nddStatus = 'Não Monitorado';
+              else if (days > filters.alertDays || nddRecord.status === 'RedEvent') nddStatus = 'Alerta';
+              else nddStatus = 'Monitorado';
+          }
+          sets.nddMon.add(nddStatus);
       });
       return {
           tipo: Array.from(sets.tipo).sort(),
@@ -257,20 +430,26 @@ const App: React.FC = () => {
           status: Array.from(sets.status).sort(),
           situacao: Array.from(sets.situacao).sort(),
           conexao: Array.from(sets.conexao).sort(),
-          mon: Array.from(sets.mon).sort()
+          mon: Array.from(sets.mon).sort(),
+          nddMon: Array.from(sets.nddMon).sort()
       };
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [allData, sdsData]);
+  }, [allData, sdsData, nddData, filters.alertDays, filters.offlineDays]);
 
   const filteredData = useMemo(() => {
       let data = [...allData];
-      
-      // Date Filters
+      const activeFilters = debouncedFilters;
+
       const stripTime = (d: string) => d ? new Date(d + "T00:00:00").getTime() : null;
-      const startC = stripTime(filters.startCreation);
-      const endC = stripTime(filters.endCreation);
-      const startF = stripTime(filters.startConclusion);
-      const endF = stripTime(filters.endConclusion);
+      const startC = stripTime(activeFilters.startCreation);
+      const endC = stripTime(activeFilters.endCreation);
+      const startF = stripTime(activeFilters.startConclusion);
+      const endF = stripTime(activeFilters.endConclusion);
+      
+      const hasSearch = !!activeFilters.search;
+      const term = activeFilters.search.toLowerCase();
+      const isGlobal = activeFilters.searchField === 'all';
+      
+      const now = new Date();
 
       data = data.filter(item => {
           if (startC || endC) {
@@ -278,7 +457,7 @@ const App: React.FC = () => {
              if (t) {
                 if (startC && t < startC) return false;
                 if (endC && t > endC) return false;
-             } else if (startC || endC) return false; // Filter active but no date
+             } else if (startC || endC) return false; 
           }
           if (startF || endF) {
              const t = item._rawConclusao ? new Date(item._rawConclusao).setHours(0,0,0,0) : null;
@@ -288,31 +467,91 @@ const App: React.FC = () => {
              } else if (startF || endF) return false;
           }
 
-          if (filters.selectedTypes.length && !filters.selectedTypes.includes(item.tipo)) return false;
-          if (filters.selectedProds.length && !filters.selectedProds.includes(item.equipProduzindo)) return false;
-          if (filters.selectedStatus.length && !filters.selectedStatus.includes(item.statusOs)) return false;
-          if (filters.selectedSituacao.length && !filters.selectedSituacao.includes(item.situacaoEquip)) return false;
-          if (filters.selectedConexao.length && !filters.selectedConexao.includes(item.tipoConexao)) return false;
+          if (activeFilters.selectedTypes.length && !activeFilters.selectedTypes.includes(item.tipo)) return false;
+          if (activeFilters.selectedProds.length && !activeFilters.selectedProds.includes(item.equipProduzindo)) return false;
+          if (activeFilters.selectedStatus.length && !activeFilters.selectedStatus.includes(item.statusOs)) return false;
+          if (activeFilters.selectedSituacao.length && !activeFilters.selectedSituacao.includes(item.situacaoEquip)) return false;
+          if (activeFilters.selectedConexao.length && !activeFilters.selectedConexao.includes(item.tipoConexao)) return false;
           
-          if (filters.selectedMon.length) {
-              const status = getSdsInfo(item.serie).status;
-              if (!filters.selectedMon.includes(status)) return false;
+          if (activeFilters.selectedMon.length) {
+              const key = String(item.serie).trim().toUpperCase();
+              const record = sdsData.get(key);
+              let status = 'Não Monitorado';
+              
+              if (!record) status = 'Não Monitorado';
+              else if (!record.rawLastUpdate) status = 'Dados Incompletos';
+              else {
+                  const diffDays = Math.ceil(Math.abs(now.getTime() - record.rawLastUpdate.getTime()) / (1000 * 60 * 60 * 24));
+                  if (diffDays > activeFilters.offlineDays) status = 'Não Monitorado';
+                  else if (diffDays > activeFilters.alertDays) status = 'Alerta';
+                  else status = 'Monitorado';
+              }
+              
+              if (!activeFilters.selectedMon.includes(status)) return false;
           }
 
-          if (filters.search) {
-              const term = filters.search.toLowerCase();
-              if (filters.searchField === 'all') {
-                  const sds = getSdsInfo(item.serie);
-                  const map = getMapInfo(item.serie);
-                  // Construct a searchable string
-                  const fullStr = [
-                      Object.values(item).join(' '),
-                      sds.status,
-                      Object.values(map).join(' ')
-                  ].join(' ').toLowerCase();
-                  if (!fullStr.includes(term)) return false;
+          if (activeFilters.selectedNddMon.length) {
+              const key = String(item.serie).trim().toUpperCase();
+              const nddRecord = nddData.get(key);
+              let nddStatus = 'Não Monitorado';
+              
+              if (!nddRecord) nddStatus = 'Não Monitorado';
+              else {
+                  const days = parseInt(nddRecord.daysWithoutMeters) || 0;
+                  if (days > activeFilters.offlineDays || nddRecord.status === 'NoMonitoringData') nddStatus = 'Não Monitorado';
+                  else if (days > activeFilters.alertDays || nddRecord.status === 'RedEvent') nddStatus = 'Alerta';
+                  else nddStatus = 'Monitorado';
+              }
+              
+              if (!activeFilters.selectedNddMon.includes(nddStatus)) return false;
+          }
+
+          if (hasSearch) {
+              if (isGlobal) {
+                  if (
+                      (item.os && item.os.toLowerCase().includes(term)) ||
+                      (item.serie && item.serie.toLowerCase().includes(term)) ||
+                      (item.contrato && item.contrato.toLowerCase().includes(term)) ||
+                      (item.ip && item.ip.toLowerCase().includes(term)) ||
+                      (item.tipo && item.tipo.toLowerCase().includes(term)) ||
+                      (item.bairro && item.bairro.toLowerCase().includes(term))
+                  ) return true;
+
+                  const serialKey = String(item.serie).trim().toUpperCase();
+
+                  if (mapData.size > 0) {
+                      const mapInfo = mapData.get(serialKey);
+                      if (mapInfo) {
+                           for (const k in mapInfo) {
+                               if (String(mapInfo[k]).toLowerCase().includes(term)) return true;
+                           }
+                      }
+                  }
+
+                  // Direct map lookup instead of calling getSdsInfo inside filter loop
+                  if (sdsData.size > 0) {
+                      const sdsRecord = sdsData.get(serialKey);
+                      const sdsStatus = !sdsRecord ? 'não monitorado' : !sdsRecord.rawLastUpdate ? 'dados incompletos' : 'monitorado';
+                      if (sdsStatus.includes(term)) return true;
+                  }
+
+                  if (nddData.size > 0) {
+                      const nddRecord = nddData.get(serialKey);
+                      if (nddRecord) {
+                          if (nddRecord.accountingStatus.toLowerCase().includes(term)) return true;
+                          if (nddRecord.connectionType.toLowerCase().includes(term)) return true;
+                          if (nddRecord.mpsIp.toLowerCase().includes(term)) return true;
+                      }
+                  }
+
+                  for (const k in item) {
+                      if (k.startsWith('_')) continue;
+                      if (String(item[k]).toLowerCase().includes(term)) return true;
+                  }
+
+                  return false;
               } else {
-                  const val = String(item[filters.searchField] || '').toLowerCase();
+                  const val = String(item[activeFilters.searchField] || '').toLowerCase();
                   if (!val.includes(term)) return false;
               }
           }
@@ -321,30 +560,69 @@ const App: React.FC = () => {
       });
 
       return data;
-  }, [allData, filters, sdsData, mapData]);
+  }, [allData, debouncedFilters, sdsData, nddData, mapData]);
 
   useEffect(() => setCurrentPage(1), [filteredData.length]);
 
-  const paginatedData = useMemo(() => {
-      const start = (currentPage - 1) * itemsPerPage;
-      return filteredData.slice(start, start + itemsPerPage);
-  }, [filteredData, currentPage]);
-
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
   const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+
+  // Pre-calculate sds/ndd/map info for the visible page only — avoids N*columns redundant calls
+  const pagedData = useMemo(() => filteredData.slice(startIndex, endIndex), [filteredData, startIndex, endIndex]);
+
+  const rowInfoCache = useMemo(() => {
+    const cache = new Map<string, { sds: SdsInfo; ndd: NddInfo; map: MapInfo }>();
+    pagedData.forEach(row => {
+      const key = String(row.serie).trim().toUpperCase();
+      if (!cache.has(key)) {
+        cache.set(key, {
+          sds: getSdsInfo(row.serie),
+          ndd: getNddInfo(row.serie),
+          map: getMapInfo(row.serie),
+        });
+      }
+    });
+    return cache;
+  }, [pagedData, getSdsInfo, getNddInfo, getMapInfo]);
+
+  // --- Column Management ---
+
+  const moveColumn = (index: number, direction: 'up' | 'down') => {
+      const newCols = [...columns];
+      const targetIndex = direction === 'up' ? index - 1 : index + 1;
+      if (targetIndex < 0 || targetIndex >= newCols.length) return;
+      
+      const temp = newCols[index];
+      newCols[index] = newCols[targetIndex];
+      newCols[targetIndex] = temp;
+      setColumns(newCols);
+  };
+
+  const toggleColumnVisibility = (id: string) => {
+      setColumns(columns.map(c => c.id === id ? { ...c, visible: !c.visible } : c));
+  };
+
+  const visibleColumns = useMemo(() => columns.filter(c => c.visible), [columns]);
 
   // --- Export ---
   
-  const [exportCols, setExportCols] = useState<string[]>([]);
-  const allExportOptions = useMemo(() => {
-      const standard = ['Monitoramento', 'Ultima Atualizacao', 'Data Deteccao', 'Data Criação', 'Data Conclusão', 'OS', 'ID OS Corp', 'Tipo', 'Status OS', 'Contrato', 'Nº Série', 'Situação Equip.', 'Produzindo', 'Tipo Conexão', 'IP', 'Hostname', 'Bairro', 'Cidade', 'Filial', 'Origem'];
-      const mapCols = mapColumnsConfig.map(c => c.label);
-      return [...standard, ...mapCols];
-  }, []);
-
   const handleExportClick = (type: 'csv' | 'xlsx' | 'pdf') => {
       setExportType(type);
-      setExportCols(allExportOptions); // Default select all
+      setExportCols(visibleColumns.map(c => c.label)); // Default to currently visible columns
       setExportModalOpen(true);
+  };
+
+  const handleLogoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files[0]) {
+          const reader = new FileReader();
+          reader.onload = (ev) => {
+              if(ev.target?.result) {
+                  setPdfLogo(ev.target.result as string);
+              }
+          };
+          reader.readAsDataURL(e.target.files[0]);
+      }
   };
 
   const confirmExport = () => {
@@ -353,55 +631,98 @@ const App: React.FC = () => {
 
       const exportData = filteredData.map(row => {
           const sds = getSdsInfo(row.serie);
+          const ndd = getNddInfo(row.serie);
           const map = getMapInfo(row.serie);
-          
-          const fullRow: any = {
-              'Monitoramento': sds.status,
-              'Ultima Atualizacao': sds.lastUpdate,
-              'Data Deteccao': sds.detection,
-              'Data Criação': row.dataCriacao,
-              'Data Conclusão': row.dataConclusao,
-              'OS': row.os,
-              'ID OS Corp': row.idOsCorp,
-              'Tipo': row.tipo,
-              'Status OS': row.statusOs,
-              'Contrato': row.contrato,
-              'Nº Série': row.serie,
-              'Situação Equip.': row.situacaoEquip,
-              'Produzindo': row.equipProduzindo,
-              'Tipo Conexão': row.tipoConexao,
-              'IP': row.ip,
-              'Hostname': row.hostname,
-              'Bairro': row.bairro,
-              'Cidade': row.cidade,
-              'Filial': row.filial,
-              'Origem': row.origem
-          };
-          mapColumnsConfig.forEach(c => fullRow[c.label] = map[c.key]);
 
-          // Filter columns
-          const filteredRow: any = {};
-          exportCols.forEach(col => {
-              filteredRow[col] = fullRow[col] || '';
+          const rowData: any = {};
+
+          columns.forEach(col => {
+              if (!exportCols.includes(col.label)) return;
+
+              let val = '';
+              if (col.type === 'sds') {
+                   if (col.key === 'status') val = sds.status;
+                   else if (col.key === 'lastUpdate') val = sds.lastUpdate;
+                   else if (col.key === 'detection') val = sds.detection;
+              } else if (col.type === 'ndd') {
+                   if (col.key === 'status') val = ndd.status;
+                   else if (col.key === 'lastUpdate') val = ndd.lastUpdate;
+                   else if (col.key === 'daysWithoutMeters') val = ndd.daysWithoutMeters;
+                   else if (col.key === 'accountingStatus') val = ndd.accountingStatus;
+                   else if (col.key === 'connectionType') val = ndd.connectionType;
+                   else if (col.key === 'mpsIp') val = ndd.mpsIp;
+              } else if (col.type === 'map') {
+                   val = map[col.key] || '';
+              } else {
+                   val = row[col.key] || '';
+              }
+              rowData[col.label] = val;
           });
-          return filteredRow;
+          return rowData;
       });
 
       const fname = `JustReport_${new Date().toLocaleDateString('pt-BR').replace(/\//g,'-')}`;
 
       if (exportType === 'pdf') {
           const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
-          doc.setFontSize(8);
-          doc.text("Just Report", 14, 10);
-          const head = [Object.keys(exportData[0])];
-          const body = exportData.map(Object.values);
-          autoTable(doc, {
-             head,
-             body,
-             startY: 15,
-             styles: { fontSize: 5 },
-             theme: 'grid'
-          });
+          const pageWidth = doc.internal.pageSize.width;
+          
+          // Header Config
+          const title = pdfTitle || "Just Report";
+          const margin = 14;
+          let currentY = 15;
+
+          // Logo Rendering (Right aligned)
+          let logoHeight = 0;
+          if (pdfLogo) {
+               const logoW = 30; // 30mm width
+               const logoRatio = 0.5; // Aspect ratio assumption or calculate from img
+               // Since we don't have natural dimensions easily in jsPDF without loading Image object, we assume standard aspect or square.
+               // Better approach: Fit in box 30x15
+               const logoH = 15;
+               logoHeight = logoH;
+               
+               doc.addImage(pdfLogo, 'PNG', pageWidth - margin - logoW, 10, logoW, logoH);
+          }
+
+          // Title Rendering
+          doc.setFontSize(14);
+          doc.setTextColor(40);
+          doc.text(title, margin, currentY);
+          currentY += 6;
+
+          // Observations Rendering
+          if (pdfObservation) {
+              doc.setFontSize(9);
+              doc.setTextColor(100);
+              // Split text to fit page width minus margins and potential logo space
+              const maxWidth = pageWidth - (margin * 2);
+              const lines = doc.splitTextToSize(pdfObservation, maxWidth);
+              doc.text(lines, margin, currentY);
+              currentY += (lines.length * 4) + 2;
+          }
+
+          // Ensure table starts below logo if logo is taller than text
+          if (pdfLogo) {
+              const minTableY = 10 + logoHeight + 5; 
+              if (currentY < minTableY) currentY = minTableY;
+          } else {
+              currentY += 2;
+          }
+
+          if (exportData.length > 0) {
+              const head = [Object.keys(exportData[0])];
+              const body = exportData.map(Object.values);
+              autoTable(doc, {
+                  head,
+                  body,
+                  startY: currentY,
+                  styles: { fontSize: 6, cellPadding: 1 },
+                  headStyles: { fillColor: [37, 99, 235] }, // Blue-600
+                  theme: 'grid',
+                  margin: { left: margin, right: margin }
+              });
+          }
           doc.save(`${fname}.pdf`);
       } else {
           const ws = XLSX.utils.json_to_sheet(exportData);
@@ -416,18 +737,17 @@ const App: React.FC = () => {
   const FilterDropdown = ({ title, options, selected, onChange, color = 'gray' }: any) => {
       const [open, setOpen] = useState(false);
       return (
-          <div className="relative inline-block">
+          <div className="relative inline-block ml-1">
               <button 
                  onClick={() => setOpen(!open)}
-                 className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-bold uppercase border ${selected.length ? 'bg-blue-100 border-blue-300 text-blue-700' : `bg-${color}-50 border-${color}-200 text-${color}-600`}`}
+                 className={`p-0.5 rounded hover:bg-${color}-200 transition-colors ${selected.length ? 'text-blue-600 bg-blue-50' : 'text-gray-400'}`}
               >
-                  {title} {selected.length > 0 && `(${selected.length})`}
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"/></svg>
               </button>
               {open && (
                   <>
                   <div className="fixed inset-0 z-30" onClick={() => setOpen(false)}></div>
-                  <div className="absolute z-40 mt-1 w-48 bg-white border border-gray-200 shadow-lg rounded p-2 max-h-60 overflow-y-auto">
+                  <div className="absolute z-40 mt-1 w-48 bg-white border border-gray-200 shadow-lg rounded p-2 max-h-60 overflow-y-auto left-0">
                       {options.length === 0 && <div className="text-xs text-gray-400 italic">Vazio</div>}
                       {options.map((opt: string) => (
                           <label key={opt} className="flex items-center gap-2 p-1 hover:bg-gray-50 cursor-pointer">
@@ -450,10 +770,114 @@ const App: React.FC = () => {
       );
   };
 
+  const renderHeaderCell = useCallback((col: ColumnDef, index: number) => {
+      let content = <span>{col.label}</span>;
+      let bgColor = 'bg-gray-50';
+      let textColor = 'text-gray-600';
+      let borderColor = 'border-gray-200';
+
+      const addFilter = (options: string[], selected: string[], onChange: (v: string[]) => void, color?: string) => (
+          <div className="flex items-center justify-between gap-1">
+              <span>{col.label}</span>
+              <FilterDropdown options={options} selected={selected} onChange={onChange} color={color} />
+          </div>
+      );
+
+      if (col.type === 'sds') {
+          bgColor = 'bg-blue-50/80';
+          textColor = 'text-gray-800';
+          if (col.key === 'status') {
+              content = addFilter(uniqueValues.mon, filters.selectedMon, (v) => setFilters(prev => ({...prev, selectedMon: v})), 'blue');
+          }
+      } else if (col.type === 'ndd') {
+          bgColor = 'bg-green-50/80';
+          textColor = 'text-gray-800';
+          if (col.key === 'status') {
+              content = addFilter(uniqueValues.nddMon, filters.selectedNddMon, (v) => setFilters(prev => ({...prev, selectedNddMon: v})), 'green');
+          }
+      } else if (col.type === 'map') {
+          bgColor = 'bg-purple-50/80';
+          borderColor = 'border-purple-100';
+          textColor = 'text-purple-900';
+      } else {
+          if (col.key === 'tipo') content = addFilter(uniqueValues.tipo, filters.selectedTypes, v => setFilters(prev => ({...prev, selectedTypes: v})));
+          else if (col.key === 'statusOs') content = addFilter(uniqueValues.status, filters.selectedStatus, v => setFilters(prev => ({...prev, selectedStatus: v})));
+          else if (col.key === 'situacaoEquip') content = addFilter(uniqueValues.situacao, filters.selectedSituacao, v => setFilters(prev => ({...prev, selectedSituacao: v})));
+          else if (col.key === 'equipProduzindo') content = addFilter(uniqueValues.prod, filters.selectedProds, v => setFilters(prev => ({...prev, selectedProds: v})));
+          else if (col.key === 'tipoConexao') content = addFilter(uniqueValues.conexao, filters.selectedConexao, v => setFilters(prev => ({...prev, selectedConexao: v})));
+      }
+
+      const stickyClass = index === 0 ? 'sticky left-0 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]' : '';
+
+      return (
+          <th 
+            key={col.id} 
+            className={`px-3 py-2 text-left font-bold border-b whitespace-nowrap ${bgColor} ${textColor} ${borderColor} ${stickyClass}`}
+          >
+              {content}
+          </th>
+      );
+  }, [uniqueValues, filters]);
+
+  const renderRowCell = useCallback((row: ReportItem, col: ColumnDef, index: number) => {
+      const cacheKey = String(row.serie).trim().toUpperCase();
+      const cached = rowInfoCache.get(cacheKey);
+      const sds = cached?.sds ?? getSdsInfo(row.serie);
+      const ndd = cached?.ndd ?? getNddInfo(row.serie);
+      const map = cached?.map ?? getMapInfo(row.serie);
+      let val: React.ReactNode = '';
+      let cellClass = '';
+      let title = '';
+
+      if (col.type === 'sds') {
+          cellClass = 'border-r border-gray-100';
+          if (col.key === 'status') {
+               val = sds.status;
+               cellClass += ` ${sds.colorClass}`;
+          } else if (col.key === 'lastUpdate') val = sds.lastUpdate;
+          else if (col.key === 'detection') val = sds.detection;
+      } else if (col.type === 'ndd') {
+          cellClass = 'border-r border-gray-100';
+          if (col.key === 'status') {
+               val = ndd.status;
+               cellClass += ` ${ndd.colorClass}`;
+          } else if (col.key === 'lastUpdate') val = ndd.lastUpdate;
+          else if (col.key === 'daysWithoutMeters') val = ndd.daysWithoutMeters;
+          else if (col.key === 'accountingStatus') {
+               val = ndd.accountingStatus;
+               if (ndd.accountingStatus === 'Bilhetagem Ativa') cellClass += ' bg-green-50 text-green-700 font-semibold';
+               else if (ndd.accountingStatus === 'Sem Bilhetagem Recente') cellClass += ' bg-yellow-50 text-yellow-700 font-semibold';
+               else if (ndd.accountingStatus === 'Nunca Bilhetado') cellClass += ' bg-red-50 text-red-700 font-semibold';
+          } else if (col.key === 'connectionType') val = ndd.connectionType;
+          else if (col.key === 'mpsIp') val = ndd.mpsIp;
+      } else if (col.type === 'map') {
+          val = map[col.key];
+          title = String(val);
+          cellClass = 'border-r border-purple-100 bg-purple-50/30 text-purple-900 group-hover:bg-purple-100/50';
+          val = <div className="max-w-[200px] truncate">{val}</div>;
+      } else {
+          val = row[col.key];
+          if (col.key === 'serie') cellClass = "font-mono";
+          cellClass += " border-r border-gray-100 text-gray-700";
+      }
+
+      const stickyClass = index === 0 ? 'sticky left-0 group-hover:bg-blue-100 bg-white transition-colors z-10 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]' : '';
+      
+      if (index === 0) {
+           cellClass += " bg-white"; 
+      }
+
+      return (
+          <td key={col.id} className={`px-3 py-2 whitespace-nowrap ${cellClass} ${stickyClass}`} title={title}>
+              {val}
+          </td>
+      );
+  }, [getSdsInfo, getNddInfo, getMapInfo, rowInfoCache]);
+
   return (
     <div className="h-full flex flex-col bg-white">
       {/* Header */}
-      <div className="bg-white shadow-sm p-3 z-20 flex flex-col gap-2 border-b border-gray-200">
+      <div className="bg-white shadow-sm p-3 z-30 flex flex-col gap-2 border-b border-gray-200">
         <div className="flex flex-col md:flex-row justify-between items-center gap-2">
            <div className="flex items-center gap-4">
                <h1 className="text-xl font-extrabold text-gray-800 tracking-tight bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
@@ -464,6 +888,16 @@ const App: React.FC = () => {
                    <button onClick={() => handleExportClick('xlsx')} disabled={!allData.length} className="px-2 py-1 text-xs font-bold bg-white border rounded hover:text-green-600 disabled:opacity-50 transition">XLSX</button>
                    <button onClick={() => handleExportClick('pdf')} disabled={!allData.length} className="px-2 py-1 text-xs font-bold bg-white border rounded hover:text-red-600 disabled:opacity-50 transition">PDF</button>
                </div>
+               
+               <button 
+                  onClick={() => setColumnModalOpen(true)}
+                  className="flex items-center gap-1 px-3 py-1 text-xs font-bold text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition"
+                  title="Configurar Colunas"
+               >
+                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                   Colunas
+               </button>
+
                <button 
                   onClick={handleDedupe}
                   disabled={!allData.length}
@@ -479,8 +913,7 @@ const App: React.FC = () => {
                <input 
                  ref={folderInputRef}
                  type="file" 
-                 webkitdirectory="" 
-                 directory="" 
+                 {...({ webkitdirectory: "", directory: "" } as any)}
                  multiple 
                  onChange={handleFolderSelect}
                  className="text-xs text-gray-600 file:bg-blue-600 file:text-white file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-blue-700 cursor-pointer"
@@ -491,11 +924,30 @@ const App: React.FC = () => {
         {/* Secondary Inputs */}
         <div className="flex flex-wrap items-center gap-3 bg-gray-50 p-2 rounded-lg border border-gray-200 shadow-inner">
            <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
-               <span className="text-[10px] font-bold text-gray-500 uppercase">2. Base SDS</span>
+               <div className="flex items-center gap-1">
+                 <span className="text-[10px] font-bold text-gray-500 uppercase">2. Base SDS</span>
+                 {sdsData.size > 0 && (
+                   <span className="text-[9px] font-bold text-white bg-blue-500 rounded-full px-1.5 py-0.5" title={`${sdsData.size} registros SDS`}>{sdsData.size}</span>
+                 )}
+               </div>
                <input ref={sdsInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleSdsSelect} className="text-xs text-gray-500 w-40 file:bg-gray-200 file:text-gray-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-gray-300"/>
            </div>
            <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
-               <span className="text-[10px] font-bold text-purple-700 uppercase">3. Mapa</span>
+               <div className="flex items-center gap-1">
+                 <span className="text-[10px] font-bold text-green-700 uppercase">3. Base NDD MPS</span>
+                 {nddData.size > 0 && (
+                   <span className="text-[9px] font-bold text-white bg-green-500 rounded-full px-1.5 py-0.5" title={`${nddData.size} registros MPS`}>{nddData.size}</span>
+                 )}
+               </div>
+               <input ref={nddInputRef} type="file" accept=".csv" onChange={handleNddSelect} className="text-xs text-gray-500 w-40 file:bg-green-100 file:text-green-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-green-200"/>
+           </div>
+           <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
+               <div className="flex items-center gap-1">
+                 <span className="text-[10px] font-bold text-purple-700 uppercase">4. Mapa</span>
+                 {mapData.size > 0 && (
+                   <span className="text-[9px] font-bold text-white bg-purple-500 rounded-full px-1.5 py-0.5" title={`${mapData.size} registros Mapa`}>{mapData.size}</span>
+                 )}
+               </div>
                <input ref={mapInputRef} type="file" accept=".xlsx,.xls,.xlsb" onChange={handleMapSelect} className="text-xs text-gray-500 w-40 file:bg-purple-100 file:text-purple-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-purple-200"/>
            </div>
            
@@ -552,6 +1004,7 @@ const App: React.FC = () => {
                     <option value="all">Global</option>
                     <option value="serie">Série</option>
                     <option value="os">OS</option>
+                    <option value="contrato">Contrato</option>
                     <option value="ip">IP</option>
                 </select>
                 <div className="relative flex-grow">
@@ -571,110 +1024,20 @@ const App: React.FC = () => {
       {/* Table */}
       <div className="flex-grow overflow-auto custom-scrollbar relative">
           <table className="w-full border-collapse min-w-max">
-              <thead className="bg-gray-50 sticky top-0 z-10 shadow-sm text-xs">
+              <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm text-xs">
                   <tr>
-                      {/* SDS Columns */}
-                      <th className="px-3 py-2 text-left font-bold text-gray-800 border-b border-gray-200 bg-blue-50/80 backdrop-blur sticky left-0 z-20">
-                          <div className="flex items-center justify-between gap-2">
-                             <span>Monitoramento</span>
-                             <FilterDropdown title="" options={uniqueValues.mon} selected={filters.selectedMon} onChange={(v: string[]) => setFilters({...filters, selectedMon: v})} color="blue"/>
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-800 border-b border-gray-200 bg-blue-50/80">Ult. Atualização</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-800 border-b border-gray-200 bg-blue-50/80 border-r">Data Detecção</th>
-
-                      {/* Map Columns */}
-                      {mapColumnsConfig.map(col => (
-                          <th key={col.key} className="px-3 py-2 text-left font-bold text-purple-900 border-b border-purple-100 bg-purple-50/80 whitespace-nowrap">
-                              {col.label}
-                          </th>
-                      ))}
-
-                      {/* Standard Columns */}
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Data Criação</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Data Conclusão</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">OS</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">ID OS Corp</th>
-                      
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">
-                          <div className="flex items-center justify-between gap-1">
-                              <span>Tipo</span>
-                              <FilterDropdown title="" options={uniqueValues.tipo} selected={filters.selectedTypes} onChange={(v: string[]) => setFilters({...filters, selectedTypes: v})} />
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">
-                          <div className="flex items-center justify-between gap-1">
-                              <span>Status</span>
-                              <FilterDropdown title="" options={uniqueValues.status} selected={filters.selectedStatus} onChange={(v: string[]) => setFilters({...filters, selectedStatus: v})} />
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Contrato</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Série</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">
-                          <div className="flex items-center justify-between gap-1">
-                              <span>Situação</span>
-                              <FilterDropdown title="" options={uniqueValues.situacao} selected={filters.selectedSituacao} onChange={(v: string[]) => setFilters({...filters, selectedSituacao: v})} />
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">
-                          <div className="flex items-center justify-between gap-1">
-                              <span>Prod.</span>
-                              <FilterDropdown title="" options={uniqueValues.prod} selected={filters.selectedProds} onChange={(v: string[]) => setFilters({...filters, selectedProds: v})} />
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">
-                          <div className="flex items-center justify-between gap-1">
-                              <span>Conexão</span>
-                              <FilterDropdown title="" options={uniqueValues.conexao} selected={filters.selectedConexao} onChange={(v: string[]) => setFilters({...filters, selectedConexao: v})} />
-                          </div>
-                      </th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">IP</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Hostname</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Bairro</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Cidade</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Filial</th>
-                      <th className="px-3 py-2 text-left font-bold text-gray-600 border-b bg-gray-50">Origem</th>
+                      {visibleColumns.map((col, index) => renderHeaderCell(col, index))}
                   </tr>
               </thead>
               <tbody className="text-xs text-gray-700 bg-white divide-y divide-gray-100">
-                  {paginatedData.length === 0 ? (
-                      <tr><td colSpan={30} className="px-6 py-8 text-center text-gray-400 text-sm">Nenhum dado para exibir. Carregue relatórios para começar.</td></tr>
+                  {filteredData.length === 0 ? (
+                      <tr><td colSpan={visibleColumns.length} className="px-6 py-8 text-center text-gray-400 text-sm">Nenhum dado para exibir. Carregue relatórios para começar.</td></tr>
                   ) : (
-                      paginatedData.map((row) => {
-                          const sds = getSdsInfo(row.serie);
-                          const map = getMapInfo(row.serie);
-                          return (
-                              <tr key={row.id} className="hover:bg-blue-50 transition-colors group">
-                                  <td className={`px-3 py-2 whitespace-nowrap border-r border-gray-100 sticky left-0 group-hover:bg-blue-100 transition-colors ${sds.colorClass}`}>{sds.status}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{sds.lastUpdate}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-200">{sds.detection}</td>
-                                  
-                                  {mapColumnsConfig.map(col => (
-                                      <td key={col.key} className="px-3 py-2 whitespace-nowrap border-r border-purple-100 bg-purple-50/30 text-purple-900 group-hover:bg-purple-100/50" title={map[col.key]}>
-                                          <div className="max-w-[200px] truncate">{map[col.key]}</div>
-                                      </td>
-                                  ))}
-
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.dataCriacao}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.dataConclusao}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.os}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.idOsCorp}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.tipo}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.statusOs}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.contrato}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100 font-mono">{row.serie}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.situacaoEquip}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.equipProduzindo}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.tipoConexao}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.ip}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.hostname}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.bairro}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.cidade}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap border-r border-gray-100">{row.filial}</td>
-                                  <td className="px-3 py-2 whitespace-nowrap">{row.origem}</td>
-                              </tr>
-                          );
-                      })
+                      pagedData.map((row) => (
+                          <tr key={row.id} className="hover:bg-blue-50 transition-colors group">
+                              {visibleColumns.map((col, index) => renderRowCell(row, col, index))}
+                          </tr>
+                      ))
                   )}
               </tbody>
           </table>
@@ -700,6 +1063,51 @@ const App: React.FC = () => {
               Próximo
           </button>
       </div>
+
+      {/* Column Config Modal */}
+      <Modal 
+          isOpen={columnModalOpen}
+          onClose={() => setColumnModalOpen(false)}
+          title="Configurar Colunas"
+          footer={
+             <div className="flex justify-end">
+                <button onClick={() => setColumnModalOpen(false)} className="px-4 py-2 text-sm bg-blue-600 text-white rounded font-bold hover:bg-blue-700 transition">Fechar</button>
+             </div>
+          }
+      >
+         <div className="flex flex-col gap-1">
+             <div className="text-xs text-gray-500 mb-2">Marque para exibir. Use as setas para reordenar.</div>
+             {columns.map((col, idx) => (
+                 <div key={col.id} className={`flex items-center justify-between p-2 rounded border border-gray-100 ${col.visible ? 'bg-white' : 'bg-gray-50 opacity-70'}`}>
+                     <label className="flex items-center gap-2 cursor-pointer flex-grow">
+                         <input 
+                            type="checkbox" 
+                            checked={col.visible}
+                            onChange={() => toggleColumnVisibility(col.id)}
+                            className="rounded border-gray-300 text-blue-600 w-4 h-4 focus:ring-blue-500"
+                         />
+                         <span className={`text-sm ${col.visible ? 'text-gray-800' : 'text-gray-500'}`}>{col.label}</span>
+                     </label>
+                     <div className="flex gap-1">
+                         <button 
+                            onClick={() => moveColumn(idx, 'up')}
+                            disabled={idx === 0}
+                            className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded disabled:opacity-30 disabled:hover:bg-transparent"
+                         >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7"/></svg>
+                         </button>
+                         <button 
+                            onClick={() => moveColumn(idx, 'down')}
+                            disabled={idx === columns.length - 1}
+                            className="p-1 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded disabled:opacity-30 disabled:hover:bg-transparent"
+                         >
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"/></svg>
+                         </button>
+                     </div>
+                 </div>
+             ))}
+         </div>
+      </Modal>
 
       {/* Map Sheet Selection Modal */}
       <Modal 
@@ -758,23 +1166,66 @@ const App: React.FC = () => {
          }
       >
          <div className="flex flex-col gap-4">
+            {exportType === 'pdf' && (
+                <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg space-y-3">
+                    <h4 className="text-xs font-bold text-blue-800 uppercase">Customização PDF</h4>
+                    
+                    {/* Title & Logo Row */}
+                    <div className="flex gap-3">
+                        <div className="flex-grow">
+                             <label className="block text-[10px] font-bold text-gray-600 uppercase mb-1">Título do Relatório</label>
+                             <input 
+                               type="text" 
+                               value={pdfTitle} 
+                               onChange={e => setPdfTitle(e.target.value)} 
+                               className="w-full text-sm p-1.5 border rounded focus:ring-1 focus:ring-blue-400 outline-none"
+                             />
+                        </div>
+                        <div className="flex-shrink-0">
+                            <label className="block text-[10px] font-bold text-gray-600 uppercase mb-1">Logo (Direita)</label>
+                            <div className="relative overflow-hidden w-24">
+                                <button className="w-full text-[10px] py-1.5 bg-white border border-gray-300 rounded hover:bg-gray-50 text-gray-700">Escolher Imagem</button>
+                                <input 
+                                   type="file" 
+                                   accept="image/*" 
+                                   onChange={handleLogoSelect} 
+                                   className="absolute inset-0 opacity-0 cursor-pointer"
+                                />
+                            </div>
+                            {pdfLogo && <div className="text-[9px] text-green-600 mt-0.5 text-center">Imagem carregada</div>}
+                        </div>
+                    </div>
+
+                    {/* Observations */}
+                    <div>
+                        <label className="block text-[10px] font-bold text-gray-600 uppercase mb-1">Observações (Opcional)</label>
+                        <textarea 
+                           value={pdfObservation}
+                           onChange={e => setPdfObservation(e.target.value)}
+                           className="w-full text-xs p-1.5 border rounded focus:ring-1 focus:ring-blue-400 outline-none h-16 resize-none"
+                           placeholder="Digite observações adicionais para o cabeçalho..."
+                        />
+                    </div>
+                </div>
+            )}
+
              <div className="flex gap-2">
-                 <button onClick={() => setExportCols(allExportOptions)} className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded border">Marcar Todos</button>
+                 <button onClick={() => setExportCols(columns.map(c => c.label))} className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded border">Marcar Todos</button>
                  <button onClick={() => setExportCols([])} className="text-xs px-3 py-1 bg-gray-100 hover:bg-gray-200 rounded border">Desmarcar Todos</button>
              </div>
-             <div className="grid grid-cols-2 gap-2">
-                 {allExportOptions.map(col => (
-                     <label key={col} className="flex items-center gap-2 p-2 border rounded hover:bg-gray-50 cursor-pointer">
+             <div className="grid grid-cols-2 gap-2 max-h-60 overflow-y-auto custom-scrollbar">
+                 {columns.map(col => (
+                     <label key={col.id} className="flex items-center gap-2 p-2 border rounded hover:bg-gray-50 cursor-pointer">
                          <input 
                             type="checkbox"
-                            checked={exportCols.includes(col)}
+                            checked={exportCols.includes(col.label)}
                             onChange={(e) => {
-                                if(e.target.checked) setExportCols([...exportCols, col]);
-                                else setExportCols(exportCols.filter(c => c !== col));
+                                if(e.target.checked) setExportCols([...exportCols, col.label]);
+                                else setExportCols(exportCols.filter(c => c !== col.label));
                             }}
                             className="rounded border-gray-300 text-green-600 w-4 h-4"
                          />
-                         <span className="text-xs text-gray-700">{col}</span>
+                         <span className="text-xs text-gray-700">{col.label}</span>
                      </label>
                  ))}
              </div>

@@ -1,5 +1,3 @@
-import { HTMLAttributes } from 'react';
-
 export interface ReportItem {
   id: string; // Unique ID (often based on OS or generated)
   dataCriacao: string;
@@ -31,6 +29,17 @@ export interface SdsInfo {
   detection: string;
   rawLastUpdate: Date | null;
   rawDetection: Date | null;
+}
+
+export interface NddInfo {
+  status: string;
+  colorClass: string;
+  lastUpdate: string;
+  daysWithoutMeters: string;
+  rawLastUpdate: Date | null;
+  accountingStatus: string;
+  connectionType: string;
+  mpsIp: string;
 }
 
 export interface MapInfo {
@@ -66,6 +75,7 @@ export interface FilterState {
   selectedSituacao: string[];
   selectedConexao: string[];
   selectedMon: string[];
+  selectedNddMon: string[];
 }
 
 export interface MapColumnConfig {
@@ -75,10 +85,10 @@ export interface MapColumnConfig {
   strict: boolean;
 }
 
-// Add support for webkitdirectory to InputHTMLAttributes
-declare module 'react' {
-  interface InputHTMLAttributes<T> extends HTMLAttributes<T> {
-    webkitdirectory?: string;
-    directory?: string;
-  }
+export interface ColumnDef {
+  id: string;
+  label: string;
+  visible: boolean;
+  type: 'sds' | 'map' | 'standard' | 'ndd';
+  key: string; // Key in the respective data object
 }

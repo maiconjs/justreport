@@ -22,20 +22,20 @@ const columnMap = {
 };
 
 export const mapColumnsConfig: MapColumnConfig[] = [
-  { key: 'statusGeral', label: 'Status Geral', search: ['Status Geral', 'Status Gera'], strict: false },
-  { key: 'statusItem', label: 'Status Item', search: ['Status Item'], strict: false },
-  { key: 'modelo', label: 'Modelo', search: ['Modelo'], strict: false },
-  { key: 'bairro', label: 'Bairro', search: ['Bairro'], strict: false },
-  { key: 'cidade', label: 'Cidade', search: ['Cidade'], strict: false },
-  { key: 'uf', label: 'UF', search: ['UF', 'Estado'], strict: true },
-  { key: 'cep', label: 'CEP', search: ['CEP'], strict: true },
-  { key: 'cnpj', label: 'CNPJ', search: ['CNPJ INSTALAÇÃO', 'CNPJ'], strict: false },
-  { key: 'dtInstalacao', label: 'Dt. Instalação', search: ['Dt. Instalação', 'Data Instalação'], strict: false },
-  { key: 'obs', label: 'OBS', search: ['OBS / comentário', 'OBS / comentários', 'OBS/comentários', 'OBS', 'Observações', 'Comentários'], strict: true },
-  { key: 'ip', label: 'IP', search: ['Endereço do Sistema', 'Endereço Sistema', 'IP'], strict: true },
-  { key: 'mascara', label: 'Máscara', search: ['Máscara', 'Mascara'], strict: false },
-  { key: 'gateway', label: 'Gateway', search: ['Gateway'], strict: false },
-  { key: 'dns', label: 'DNS', search: ['DNS'], strict: true }
+  { key: 'statusGeral', label: 'Status Geral (Mapa)', search: ['Status Geral', 'Status Gera'], strict: false },
+  { key: 'statusItem', label: 'Status Item (Mapa)', search: ['Status Item'], strict: false },
+  { key: 'modelo', label: 'Modelo (Mapa)', search: ['Modelo'], strict: false },
+  { key: 'bairro', label: 'Bairro (Mapa)', search: ['Bairro'], strict: false },
+  { key: 'cidade', label: 'Cidade (Mapa)', search: ['Cidade'], strict: false },
+  { key: 'uf', label: 'UF (Mapa)', search: ['UF', 'Estado'], strict: true },
+  { key: 'cep', label: 'CEP (Mapa)', search: ['CEP'], strict: true },
+  { key: 'cnpj', label: 'CNPJ (Mapa)', search: ['CNPJ INSTALAÇÃO', 'CNPJ'], strict: false },
+  { key: 'dtInstalacao', label: 'Dt. Instalação (Mapa)', search: ['Dt. Instalação', 'Data Instalação'], strict: false },
+  { key: 'obs', label: 'OBS (Mapa)', search: ['OBS / comentário', 'OBS / comentários', 'OBS/comentários', 'OBS', 'Observações', 'Comentários'], strict: true },
+  { key: 'ip', label: 'IP (Mapa)', search: ['Endereço do Sistema', 'Endereço Sistema', 'IP'], strict: true },
+  { key: 'mascara', label: 'Máscara (Mapa)', search: ['Máscara', 'Mascara'], strict: false },
+  { key: 'gateway', label: 'Gateway (Mapa)', search: ['Gateway'], strict: false },
+  { key: 'dns', label: 'DNS (Mapa)', search: ['DNS'], strict: true }
 ];
 
 export const readExcelFile = async (file: File): Promise<any[]> => {
@@ -47,6 +47,65 @@ export const readExcelFile = async (file: File): Promise<any[]> => {
         const workbook = XLSX.read(data, { type: 'array', cellDates: true });
         const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
         const jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+        resolve(jsonData);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+};
+
+export const readNddCsv = async (file: File): Promise<any[]> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const arrayBuffer = e.target?.result as ArrayBuffer;
+        const data = new Uint8Array(arrayBuffer);
+        
+        // Use XLSX to read the CSV, it's generally better at detecting delimiters and encodings
+        const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+        const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+        let jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: "" });
+
+        // Clean up keys in jsonData if they have BOM or quotes
+        if (jsonData.length > 0) {
+            jsonData = jsonData.map((row: any) => {
+                const newRow: any = {};
+                for (const key in row) {
+                    const cleanKey = key.trim().replace(/^\uFEFF/, '').replace(/^"|"$/g, '').trim();
+                    newRow[cleanKey] = row[key];
+                }
+                return newRow;
+            });
+        }
+
+        // Check if it parsed correctly (if it only has one column and it contains semicolons, it failed to detect delimiter)
+        if (jsonData.length > 0) {
+           const firstRow = jsonData[0] as any;
+           const keys = Object.keys(firstRow);
+           if (keys.length === 1 && String(firstRow[keys[0]]).includes(';')) {
+              // Fallback to manual semicolon parsing if XLSX failed
+              const decoder = new TextDecoder('iso-8859-1');
+              const text = decoder.decode(data);
+              const lines = text.split(/\r?\n/);
+              const headers = lines[0].split(';').map(h => h.trim().replace(/^"|"$/g, ''));
+              const result = [];
+              for (let i = 1; i < lines.length; i++) {
+                if (!lines[i].trim()) continue;
+                const currentLine = lines[i].split(';').map(v => v.trim().replace(/^"|"$/g, ''));
+                const obj: any = {};
+                for (let j = 0; j < headers.length; j++) {
+                  obj[headers[j]] = currentLine[j] || "";
+                }
+                result.push(obj);
+              }
+              return resolve(result);
+           }
+        }
+        
         resolve(jsonData);
       } catch (error) {
         reject(error);
