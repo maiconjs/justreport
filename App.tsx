@@ -2,46 +2,60 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { ReportItem, SdsInfo, NddInfo, MapInfo, FilterState, MapColumnConfig, ColumnDef } from './types';
-import { readExcelFile, readNddCsv, processReportData, parseMapWorkbook, processMapSheet, mapColumnsConfig } from './services/excelService';
+import { ReportItem, SdsInfo, NddInfo, MapInfo, CorporateInfo, CepInvalidEntry, FilterState, MapColumnConfig, ColumnDef } from './types';
+import { readExcelFile, readNddCsv, processReportData, parseMapWorkbook, processMapSheet, mapColumnsConfig, processCorporateFile } from './services/excelService';
+import { bulkLookupCeps } from './services/viacepService';
 import { parseDateRobust } from './utils/dateUtils';
 import { Modal } from './components/Modal';
 import { ProgressBar } from './components/ProgressBar';
 import { useDebounce } from './hooks/useDebounce';
+import { Dashboard, DashboardStats, LocationBreakdown } from './components/Dashboard';
 
 // Initial Column Definitions
 const INITIAL_COLUMNS: ColumnDef[] = [
-  // SDS
-  { id: 'mon', label: 'Monitoramento', visible: true, type: 'sds', key: 'status' },
-  { id: 'lastUpdate', label: 'Ult. Atualização', visible: true, type: 'sds', key: 'lastUpdate' },
-  { id: 'detection', label: 'Data Detecção', visible: true, type: 'sds', key: 'detection' },
-  // NDD MPS
-  { id: 'nddMon', label: 'Monitoramento MPS', visible: true, type: 'ndd', key: 'status' },
-  { id: 'nddLastUpdate', label: 'Ult. Leitura MPS', visible: true, type: 'ndd', key: 'lastUpdate' },
-  { id: 'nddDays', label: 'Dias s/ Contador MPS', visible: true, type: 'ndd', key: 'daysWithoutMeters' },
-  { id: 'nddAccounting', label: 'Contabilização MPS', visible: true, type: 'ndd', key: 'accountingStatus' },
-  { id: 'nddConnectionType', label: 'Conexão MPS', visible: true, type: 'ndd', key: 'connectionType' },
-  { id: 'nddMpsIp', label: 'IP MPS', visible: true, type: 'ndd', key: 'mpsIp' },
-  // Map (Generated from config)
-  ...mapColumnsConfig.map(c => ({ id: `map_${c.key}`, label: c.label, visible: true, type: 'map', key: c.key } as ColumnDef)),
-  // Standard
-  { id: 'dataCriacao', label: 'Data Criação', visible: true, type: 'standard', key: 'dataCriacao' },
-  { id: 'dataConclusao', label: 'Data Conclusão', visible: true, type: 'standard', key: 'dataConclusao' },
-  { id: 'os', label: 'OS', visible: true, type: 'standard', key: 'os' },
-  { id: 'idOsCorp', label: 'ID OS Corp', visible: true, type: 'standard', key: 'idOsCorp' },
-  { id: 'tipo', label: 'Tipo', visible: true, type: 'standard', key: 'tipo' },
-  { id: 'statusOs', label: 'Status OS', visible: true, type: 'standard', key: 'statusOs' },
-  { id: 'contrato', label: 'Contrato', visible: true, type: 'standard', key: 'contrato' },
-  { id: 'serie', label: 'Série', visible: true, type: 'standard', key: 'serie' },
-  { id: 'situacaoEquip', label: 'Situação Equip.', visible: true, type: 'standard', key: 'situacaoEquip' },
-  { id: 'equipProduzindo', label: 'Produzindo', visible: true, type: 'standard', key: 'equipProduzindo' },
-  { id: 'tipoConexao', label: 'Tipo Conexão', visible: true, type: 'standard', key: 'tipoConexao' },
-  { id: 'ip', label: 'IP', visible: true, type: 'standard', key: 'ip' },
-  { id: 'hostname', label: 'Hostname', visible: true, type: 'standard', key: 'hostname' },
-  { id: 'bairro', label: 'Bairro', visible: true, type: 'standard', key: 'bairro' },
-  { id: 'cidade', label: 'Cidade', visible: true, type: 'standard', key: 'cidade' },
-  { id: 'filial', label: 'Filial', visible: true, type: 'standard', key: 'filial' },
-  { id: 'origem', label: 'Origem', visible: true, type: 'standard', key: 'origem' },
+  // SDS — hidden until SDS base is loaded
+  { id: 'mon', label: 'Monitoramento', visible: false, type: 'sds', key: 'status' },
+  { id: 'lastUpdate', label: 'Ult. Atualização', visible: false, type: 'sds', key: 'lastUpdate' },
+  { id: 'detection', label: 'Data Detecção', visible: false, type: 'sds', key: 'detection' },
+  // NDD MPS — hidden until NDD base is loaded
+  { id: 'nddMon', label: 'Monitoramento MPS', visible: false, type: 'ndd', key: 'status' },
+  { id: 'nddLastUpdate', label: 'Ult. Leitura MPS', visible: false, type: 'ndd', key: 'lastUpdate' },
+  { id: 'nddDays', label: 'Dias s/ Contador MPS', visible: false, type: 'ndd', key: 'daysWithoutMeters' },
+  { id: 'nddAccounting', label: 'Contabilização MPS', visible: false, type: 'ndd', key: 'accountingStatus' },
+  { id: 'nddConnectionType', label: 'Conexão MPS', visible: false, type: 'ndd', key: 'connectionType' },
+  { id: 'nddMpsIp', label: 'IP MPS', visible: false, type: 'ndd', key: 'mpsIp' },
+  // Map — hidden until Mapa is loaded
+  ...mapColumnsConfig.map(c => ({ id: `map_${c.key}`, label: c.label, visible: false, type: 'map', key: c.key } as ColumnDef)),
+  // Corporate — hidden until Corporate is loaded
+  { id: 'corp_status',      label: 'Status Contrato',       visible: false, type: 'corporate', key: 'status' },
+  { id: 'corp_modelo',      label: 'Modelo (Contrato)',      visible: false, type: 'corporate', key: 'modelo' },
+  { id: 'corp_cliente',     label: 'Cliente (Contrato)',     visible: false, type: 'corporate', key: 'clienteInstalacao' },
+  { id: 'corp_logradouro',  label: 'Logradouro (Ctto)',      visible: false, type: 'corporate', key: 'logradouro' },
+  { id: 'corp_complemento', label: 'Complemento (Ctto)',     visible: false, type: 'corporate', key: 'complemento' },
+  { id: 'corp_bairro',      label: 'Bairro (Ctto)',          visible: false, type: 'corporate', key: 'bairro' },
+  { id: 'corp_cidade',      label: 'Cidade (Ctto)',          visible: false, type: 'corporate', key: 'cidade' },
+  { id: 'corp_uf',          label: 'UF (Ctto)',              visible: false, type: 'corporate', key: 'uf' },
+  { id: 'corp_cep',         label: 'CEP (Ctto)',             visible: false, type: 'corporate', key: 'cep' },
+  { id: 'corp_dtInstal',    label: 'Dt. Instalação (Ctto)',  visible: false, type: 'corporate', key: 'dataInstalacao' },
+  { id: 'corp_endereco',    label: 'Endereço Completo (Ctto)',visible: false, type: 'corporate', key: 'enderecoInstalacao' },
+  // Standard — always visible
+  { id: 'serie',         label: 'Série',           visible: true, type: 'standard', key: 'serie' },
+  { id: 'contrato',      label: 'Contrato',         visible: true, type: 'standard', key: 'contrato' },
+  { id: 'statusOs',      label: 'Status OS',        visible: true, type: 'standard', key: 'statusOs' },
+  { id: 'tipo',          label: 'Tipo',             visible: true, type: 'standard', key: 'tipo' },
+  { id: 'dataCriacao',   label: 'Data Criação',     visible: true, type: 'standard', key: 'dataCriacao' },
+  { id: 'dataConclusao', label: 'Data Conclusão',   visible: true, type: 'standard', key: 'dataConclusao' },
+  { id: 'os',            label: 'OS',               visible: true, type: 'standard', key: 'os' },
+  { id: 'idOsCorp',      label: 'ID OS Corp',       visible: true, type: 'standard', key: 'idOsCorp' },
+  { id: 'situacaoEquip', label: 'Situação Equip.',  visible: true, type: 'standard', key: 'situacaoEquip' },
+  { id: 'equipProduzindo',label:'Produzindo',        visible: true, type: 'standard', key: 'equipProduzindo' },
+  { id: 'tipoConexao',   label: 'Tipo Conexão',     visible: true, type: 'standard', key: 'tipoConexao' },
+  { id: 'ip',            label: 'IP',               visible: true, type: 'standard', key: 'ip' },
+  { id: 'hostname',      label: 'Hostname',         visible: true, type: 'standard', key: 'hostname' },
+  { id: 'bairro',        label: 'Bairro',           visible: true, type: 'standard', key: 'bairro' },
+  { id: 'cidade',        label: 'Cidade',           visible: true, type: 'standard', key: 'cidade' },
+  { id: 'filial',        label: 'Filial',           visible: true, type: 'standard', key: 'filial' },
+  { id: 'origem',        label: 'Origem',           visible: true, type: 'standard', key: 'origem' },
 ];
 
 const App: React.FC = () => {
@@ -50,12 +64,23 @@ const App: React.FC = () => {
   const [sdsData, setSdsData] = useState<Map<string, { rawLastUpdate: Date | null, rawDetection: Date | null }>>(new Map());
   const [nddData, setNddData] = useState<Map<string, { status: string, lastUpdate: string, daysWithoutMeters: string, rawLastUpdate: Date | null, accountingStatus: string, connectionType: string, mpsIp: string }>>(new Map());
   const [mapData, setMapData] = useState<Map<string, MapInfo>>(new Map());
-  
+  const [corporateData, setCorporateData] = useState<Map<string, CorporateInfo>>(new Map());
+  const [useCepValidation, setUseCepValidation] = useState(true);
+  const [cepValidationProgress, setCepValidationProgress] = useState<{ done: number; total: number } | null>(null);
+  const cepAbortRef = useRef<AbortController | null>(null);
+
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [progressText, setProgressText] = useState('');
 
   // UI State
+  const [activeTab, setActiveTab] = useState<'table' | 'dashboard'>('table');
+
+  // Visibility toggles — when unchecked the data is treated as empty for display/dashboard
+  const [showSds, setShowSds] = useState(true);
+  const [showNdd, setShowNdd] = useState(true);
+  const [showMap, setShowMap] = useState(true);
+  const [showCorp, setShowCorp] = useState(true);
   const [sheetModalOpen, setSheetModalOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [columnModalOpen, setColumnModalOpen] = useState(false);
@@ -107,17 +132,75 @@ const App: React.FC = () => {
   const sdsInputRef = useRef<HTMLInputElement>(null);
   const mapInputRef = useRef<HTMLInputElement>(null);
   const nddInputRef = useRef<HTMLInputElement>(null);
+  const corpInputRef = useRef<HTMLInputElement>(null);
 
   // --- Effects ---
   useEffect(() => {
     document.title = "Just Report";
   }, []);
 
+  // Auto-show columns the first time each base is loaded
+  const sdsColumnsRevealed  = useRef(false);
+  const nddColumnsRevealed  = useRef(false);
+  const mapColumnsRevealed  = useRef(false);
+  const corpColumnsRevealed = useRef(false);
+
+  useEffect(() => {
+    if (sdsData.size > 0 && !sdsColumnsRevealed.current) {
+      sdsColumnsRevealed.current = true;
+      setColumns(prev => prev.map(c => c.type === 'sds' ? { ...c, visible: true } : c));
+    }
+  }, [sdsData.size]);
+
+  useEffect(() => {
+    if (nddData.size > 0 && !nddColumnsRevealed.current) {
+      nddColumnsRevealed.current = true;
+      setColumns(prev => prev.map(c => c.type === 'ndd' ? { ...c, visible: true } : c));
+    }
+  }, [nddData.size]);
+
+  useEffect(() => {
+    if (mapData.size > 0 && !mapColumnsRevealed.current) {
+      mapColumnsRevealed.current = true;
+      setColumns(prev => prev.map(c => c.type === 'map' ? { ...c, visible: true } : c));
+    }
+  }, [mapData.size]);
+
+  useEffect(() => {
+    if (corporateData.size > 0 && !corpColumnsRevealed.current) {
+      corpColumnsRevealed.current = true;
+      setColumns(prev => prev.map(c =>
+        c.type === 'corporate' || c.id === 'serie' ? { ...c, visible: true } : c
+      ));
+    }
+  }, [corporateData.size]);
+
+  // Synthetic rows from Corporate when no reports are loaded (corporate-only mode)
+  const corporateRows = useMemo((): ReportItem[] => {
+    if (allData.length > 0 || corporateData.size === 0) return [];
+    return Array.from(corporateData.values() as Iterable<CorporateInfo>).map((c): ReportItem => ({
+      id: `corp-${c.serial}`,
+      dataCriacao: '-', dataConclusao: '-',
+      os: '-', idOsCorp: '-', tipo: '-',
+      statusOs: c.status,
+      contrato: c.clienteInstalacao || '-',
+      serie: c.serial,
+      situacaoEquip: '-', equipProduzindo: '-',
+      tipoConexao: '-', ip: '-', hostname: '-',
+      bairro: c.bairro || '-', cidade: c.cidade || '-', filial: c.uf || '-',
+      origem: 'Corporate',
+      _rawCriacao: null, _rawConclusao: null,
+    }));
+  }, [allData.length, corporateData]);
+
+  // The data that drives the table — reports when loaded, corporate rows otherwise
+  const effectiveData = allData.length > 0 ? allData : corporateRows;
+
   // --- Helpers (Memoized to avoid recreation) ---
 
   const getSdsInfo = useCallback((serial: string): SdsInfo => {
     const empty = { status: '-', colorClass: '', lastUpdate: '-', detection: '-', rawLastUpdate: null, rawDetection: null } as SdsInfo;
-    if (sdsData.size === 0 || !serial || serial === '-') return empty;
+    if (!showSds || sdsData.size === 0 || !serial || serial === '-') return empty;
     
     const key = String(serial).trim().toUpperCase();
     const record = sdsData.get(key);
@@ -139,11 +222,11 @@ const App: React.FC = () => {
     if (diffDays > filters.alertDays) return { status: 'Alerta', colorClass: 'bg-yellow-100 text-yellow-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
     
     return { status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
-  }, [sdsData, filters.offlineDays, filters.alertDays]);
+  }, [sdsData, showSds, filters.offlineDays, filters.alertDays]);
 
   const getNddInfo = useCallback((serial: string): NddInfo => {
     const empty = { status: '-', colorClass: '', lastUpdate: '-', daysWithoutMeters: '-', rawLastUpdate: null, accountingStatus: '-', connectionType: '-', mpsIp: '-' } as NddInfo;
-    if (nddData.size === 0 || !serial || serial === '-') return empty;
+    if (!showNdd || nddData.size === 0 || !serial || serial === '-') return empty;
 
     const key = String(serial).trim().toUpperCase();
     const record = nddData.get(key);
@@ -164,17 +247,17 @@ const App: React.FC = () => {
     }
 
     return { status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, daysWithoutMeters, rawLastUpdate, ...extras };
-  }, [nddData, filters.offlineDays, filters.alertDays]);
+  }, [nddData, showNdd, filters.offlineDays, filters.alertDays]);
 
   const getMapInfo = useCallback((serial: string): MapInfo => {
-    if (mapData.size === 0 || !serial || serial === '-') {
+    if (!showMap || mapData.size === 0 || !serial || serial === '-') {
       const empty: any = {};
       mapColumnsConfig.forEach(c => empty[c.key] = '-');
       return empty;
     }
     const key = String(serial).trim().toUpperCase();
     return mapData.get(key) || mapColumnsConfig.reduce((acc, col) => ({...acc, [col.key]: 'N/A'}), {} as MapInfo);
-  }, [mapData]);
+  }, [mapData, showMap]);
 
   // --- Handlers ---
 
@@ -319,6 +402,94 @@ const App: React.FC = () => {
     }
   };
 
+  const handleCorpSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files || !e.target.files[0]) return;
+
+    // Cancel any previous CEP validation still running
+    cepAbortRef.current?.abort();
+    cepAbortRef.current = null;
+    setCepValidationProgress(null);
+
+    setIsProcessing(true);
+    setProgressText("Lendo base Corporate...");
+    try {
+      const data = await processCorporateFile(e.target.files[0]);
+      setCorporateData(data);
+      setIsProcessing(false);
+      setProgressText('');
+      if (corpInputRef.current) corpInputRef.current.value = '';
+
+      if (!useCepValidation) return;
+
+      // --- ViaCEP validation phase ---
+      const allCeps = Array.from(data.values() as Iterable<CorporateInfo>)
+        .map(c => c.cep)
+        .filter(c => c.length === 8);
+
+      if (allCeps.length === 0) return;
+
+      const controller = new AbortController();
+      cepAbortRef.current = controller;
+      setCepValidationProgress({ done: 0, total: allCeps.length });
+      setProgressText(`Validando CEPs via ViaCEP (0 / ${allCeps.length})...`);
+      setIsProcessing(true);
+
+      try {
+        const results = await bulkLookupCeps(
+          allCeps,
+          (done, total) => {
+            setCepValidationProgress({ done, total });
+            setProgressText(`Validando CEPs via ViaCEP (${done} / ${total})...`);
+          },
+          controller.signal
+        );
+
+        // Merge results back into corporateData (mutable update on a new Map)
+        setCorporateData(prev => {
+          const next = new Map(prev);
+          (next as Map<string, CorporateInfo>).forEach((info, key) => {
+            const hit = results.get(info.cep);
+            if (hit === undefined) return; // CEP had no digits or wasn't queried
+            const updated: CorporateInfo = {
+              ...info,
+              cepStatus: hit ? 'valid' : 'invalid',
+              // Overwrite address fields only if ViaCEP returned data
+              ...(hit ? {
+                logradouro: hit.logradouro || info.logradouro,
+                complemento: hit.complemento || info.complemento,
+                bairro: hit.bairro || info.bairro,
+                cidade: hit.localidade || info.cidade,
+                uf: hit.uf || info.uf,
+              } : {}),
+            };
+            next.set(key, updated);
+          });
+          return next;
+        });
+      } catch {
+        // aborted or network error — leave cepStatus as 'unchecked'
+      } finally {
+        setIsProcessing(false);
+        setProgressText('');
+        setCepValidationProgress(null);
+        cepAbortRef.current = null;
+      }
+
+    } catch (err: any) {
+      alert(`Erro ao ler arquivo Corporate:\n${err?.message || err}`);
+      console.error(err);
+      setIsProcessing(false);
+      setProgressText('');
+      if (corpInputRef.current) corpInputRef.current.value = '';
+    }
+  };
+
+  const getCorporateInfo = useCallback((serial: string): CorporateInfo | null => {
+    if (!showCorp || corporateData.size === 0 || !serial || serial === '-') return null;
+    const key = String(serial).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+    return corporateData.get(key) || null;
+  }, [corporateData, showCorp]);
+
   const handleMapSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
       if (!e.target.files || !e.target.files[0]) return;
       try {
@@ -393,7 +564,7 @@ const App: React.FC = () => {
       
       const now = new Date();
 
-      allData.forEach(item => {
+      effectiveData.forEach(item => {
           if (item.tipo) sets.tipo.add(item.tipo);
           if (item.equipProduzindo) sets.prod.add(item.equipProduzindo);
           if (item.statusOs) sets.status.add(item.statusOs);
@@ -433,10 +604,10 @@ const App: React.FC = () => {
           mon: Array.from(sets.mon).sort(),
           nddMon: Array.from(sets.nddMon).sort()
       };
-  }, [allData, sdsData, nddData, filters.alertDays, filters.offlineDays]);
+  }, [effectiveData, sdsData, nddData, filters.alertDays, filters.offlineDays]);
 
   const filteredData = useMemo(() => {
-      let data = [...allData];
+      let data = [...effectiveData];
       const activeFilters = debouncedFilters;
 
       const stripTime = (d: string) => d ? new Date(d + "T00:00:00").getTime() : null;
@@ -560,7 +731,7 @@ const App: React.FC = () => {
       });
 
       return data;
-  }, [allData, debouncedFilters, sdsData, nddData, mapData]);
+  }, [effectiveData, debouncedFilters, sdsData, nddData, mapData]);
 
   useEffect(() => setCurrentPage(1), [filteredData.length]);
 
@@ -572,7 +743,7 @@ const App: React.FC = () => {
   const pagedData = useMemo(() => filteredData.slice(startIndex, endIndex), [filteredData, startIndex, endIndex]);
 
   const rowInfoCache = useMemo(() => {
-    const cache = new Map<string, { sds: SdsInfo; ndd: NddInfo; map: MapInfo }>();
+    const cache = new Map<string, { sds: SdsInfo; ndd: NddInfo; map: MapInfo; corp: CorporateInfo | null }>();
     pagedData.forEach(row => {
       const key = String(row.serie).trim().toUpperCase();
       if (!cache.has(key)) {
@@ -580,11 +751,209 @@ const App: React.FC = () => {
           sds: getSdsInfo(row.serie),
           ndd: getNddInfo(row.serie),
           map: getMapInfo(row.serie),
+          corp: getCorporateInfo(row.serie),
         });
       }
     });
     return cache;
-  }, [pagedData, getSdsInfo, getNddInfo, getMapInfo]);
+  }, [pagedData, getSdsInfo, getNddInfo, getMapInfo, getCorporateInfo]);
+
+  // --- Dashboard Stats ---
+
+  const dashboardStats = useMemo((): DashboardStats => {
+    const now = new Date();
+    const sdsLoaded = sdsData.size > 0;
+    const nddLoaded = nddData.size > 0;
+    const corpLoaded = corporateData.size > 0 && showCorp;
+
+    const sds = { monitored: 0, alert: 0, notMonitored: 0, incomplete: 0 };
+    const ndd = { monitored: 0, alert: 0, notMonitored: 0 };
+    const billing = { active: 0, noRecent: 0, never: 0 };
+    const corp = { inContract: 0, outOfContract: 0, ativo: 0, inativo: 0 };
+    const producingMap: Record<string, number> = {};
+    const situacaoMap: Record<string, number> = {};
+    const tipoMap: Record<string, number> = {};
+    const cidadeMap: Record<string, number> = {};
+    const contratoMap: Record<string, number> = {};
+    const modeloMap: Record<string, number> = {};
+    const ufMap: Record<string, number> = {};
+    const connMap: Record<string, number> = {};
+
+    // Location breakdown maps (keyed by contrato and cidade)
+    const locContratoMap = new Map<string, LocationBreakdown>();
+    const locCityMap     = new Map<string, LocationBreakdown>();
+
+    const getOrCreateLoc = (map: Map<string, LocationBreakdown>, name: string): LocationBreakdown => {
+      if (!map.has(name)) {
+        map.set(name, {
+          name,
+          total: 0,
+          sds: { monitored: 0, alert: 0, notMonitored: 0, noData: 0 },
+          ndd: { monitored: 0, alert: 0, notMonitored: 0, noData: 0 },
+          billing: { active: 0, noRecent: 0, never: 0 },
+          situacao: [],
+          serials: [],
+        });
+      }
+      return map.get(name)!;
+    };
+
+    // Temporary situacao maps per location (finalized after loop)
+    const locContratoSit = new Map<string, Record<string, number>>();
+    const locCitySit     = new Map<string, Record<string, number>>();
+
+    filteredData.forEach(item => {
+      const key = String(item.serie).trim().toUpperCase();
+
+      // Classify SDS status for this item
+      let sdsStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData' = 'noData';
+      if (sdsLoaded) {
+        const rec = sdsData.get(key);
+        if (!rec) {
+          sds.notMonitored++; sdsStatus = 'notMonitored';
+        } else if (!rec.rawLastUpdate) {
+          sds.incomplete++; sdsStatus = 'notMonitored';
+        } else {
+          const diff = Math.ceil(Math.abs(now.getTime() - rec.rawLastUpdate.getTime()) / 86400000);
+          if (diff > filters.offlineDays)      { sds.notMonitored++; sdsStatus = 'notMonitored'; }
+          else if (diff > filters.alertDays)   { sds.alert++;        sdsStatus = 'alert'; }
+          else                                  { sds.monitored++;    sdsStatus = 'monitored'; }
+        }
+      }
+
+      // Classify NDD status for this item
+      let nddStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData' = 'noData';
+      let itemBilling: 'active' | 'noRecent' | 'never' | null = null;
+      if (nddLoaded) {
+        const rec = nddData.get(key);
+        if (!rec) {
+          ndd.notMonitored++; nddStatus = 'notMonitored';
+        } else {
+          const days = parseInt(rec.daysWithoutMeters) || 0;
+          if (days > filters.offlineDays || rec.status === 'NoMonitoringData') { ndd.notMonitored++; nddStatus = 'notMonitored'; }
+          else if (days > filters.alertDays || rec.status === 'RedEvent')      { ndd.alert++;        nddStatus = 'alert'; }
+          else                                                                   { ndd.monitored++;    nddStatus = 'monitored'; }
+
+          if (rec.accountingStatus === 'Bilhetagem Ativa')       { billing.active++;  itemBilling = 'active'; }
+          else if (rec.accountingStatus === 'Sem Bilhetagem Recente') { billing.noRecent++; itemBilling = 'noRecent'; }
+          else if (rec.accountingStatus === 'Nunca Bilhetado')    { billing.never++;   itemBilling = 'never'; }
+
+          const conn = rec.connectionType || '-';
+          connMap[conn] = (connMap[conn] || 0) + 1;
+        }
+      }
+
+      if (corpLoaded) {
+        const corpKey = String(item.serie || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+        const corpRec = corpKey ? corporateData.get(corpKey) : null;
+        if (corpRec) {
+          corp.inContract++;
+          if (corpRec.status.toLowerCase().includes('ativo')) corp.ativo++;
+          else corp.inativo++;
+          if (corpRec.modelo) modeloMap[corpRec.modelo] = (modeloMap[corpRec.modelo] || 0) + 1;
+          if (corpRec.uf) ufMap[corpRec.uf] = (ufMap[corpRec.uf] || 0) + 1;
+        } else {
+          corp.outOfContract++;
+        }
+      }
+
+      const prod = item.equipProduzindo || '-';
+      if (prod !== '-') producingMap[prod] = (producingMap[prod] || 0) + 1;
+
+      const sit = item.situacaoEquip || '-';
+      if (sit !== '-') situacaoMap[sit] = (situacaoMap[sit] || 0) + 1;
+
+      const t = item.tipo || '-';
+      if (t !== '-') tipoMap[t] = (tipoMap[t] || 0) + 1;
+
+      const city = item.cidade || '-';
+      if (city !== '-') cidadeMap[city] = (cidadeMap[city] || 0) + 1;
+
+      const contrato = item.contrato || '-';
+      if (contrato !== '-') contratoMap[contrato] = (contratoMap[contrato] || 0) + 1;
+
+      // --- Accumulate location breakdowns ---
+      const applyToLoc = (loc: LocationBreakdown, sitMap: Map<string, Record<string, number>>, locName: string) => {
+        loc.total++;
+        if (item.serie && item.serie !== '-') loc.serials.push(item.serie);
+
+        if (sdsLoaded)  loc.sds[sdsStatus]++;
+        else            loc.sds.noData++;
+
+        if (nddLoaded)  loc.ndd[nddStatus]++;
+        else            loc.ndd.noData++;
+
+        if (itemBilling) loc.billing[itemBilling]++;
+
+        if (sit !== '-') {
+          if (!sitMap.has(locName)) sitMap.set(locName, {});
+          const sm = sitMap.get(locName)!;
+          sm[sit] = (sm[sit] || 0) + 1;
+        }
+      };
+
+      if (contrato !== '-') {
+        applyToLoc(getOrCreateLoc(locContratoMap, contrato), locContratoSit, contrato);
+      }
+      if (city !== '-') {
+        applyToLoc(getOrCreateLoc(locCityMap, city), locCitySit, city);
+      }
+    });
+
+    // Finalize situacao arrays for each location
+    const finalizeLocs = (
+      map: Map<string, LocationBreakdown>,
+      sitMap: Map<string, Record<string, number>>
+    ): LocationBreakdown[] =>
+      Array.from(map.values())
+        .map(loc => ({
+          ...loc,
+          situacao: Object.entries(sitMap.get(loc.name) || {})
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 6)
+            .map(([name, count]) => ({ name, count })),
+        }))
+        .sort((a, b) => b.total - a.total);
+
+    const sortedTop = (map: Record<string, number>, limit = 10) =>
+      Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, limit).map(([name, count]) => ({ name, count }));
+
+    return {
+      total: filteredData.length,
+      sdsLoaded,
+      nddLoaded,
+      corpLoaded,
+      sds,
+      ndd,
+      billing,
+      corp,
+      producing: sortedTop(producingMap, 6),
+      situacao: sortedTop(situacaoMap, 8),
+      tipo: sortedTop(tipoMap, 8),
+      byCidade: sortedTop(cidadeMap, 10),
+      byContrato: sortedTop(contratoMap, 10),
+      byModelo: sortedTop(modeloMap, 15),
+      byUf: sortedTop(ufMap, 30),
+      connectionType: sortedTop(connMap, 5),
+      locationsByContrato: finalizeLocs(locContratoMap, locContratoSit),
+      locationsByCity:     finalizeLocs(locCityMap, locCitySit),
+      cepStats: corpLoaded ? (() => {
+        const allCorp = Array.from(corporateData.values() as Iterable<CorporateInfo>);
+        let valid = 0, invalid = 0, unchecked = 0;
+        const invalidList: CepInvalidEntry[] = [];
+        allCorp.forEach(c => {
+          if (!c.cep || c.cep.length !== 8) { unchecked++; return; }
+          if (c.cepStatus === 'valid')   { valid++; }
+          else if (c.cepStatus === 'invalid') {
+            invalid++;
+            invalidList.push({ serial: c.serial, cep: c.cep, enderecoRaw: c.enderecoInstalacao, cidade: c.cidade, uf: c.uf, modelo: c.modelo });
+          }
+          else { unchecked++; }
+        });
+        return { total: valid + invalid, valid, invalid, unchecked, invalidList };
+      })() : null,
+    };
+  }, [filteredData, sdsData, nddData, corporateData, showCorp, filters.alertDays, filters.offlineDays]);
 
   // --- Column Management ---
 
@@ -633,6 +1002,7 @@ const App: React.FC = () => {
           const sds = getSdsInfo(row.serie);
           const ndd = getNddInfo(row.serie);
           const map = getMapInfo(row.serie);
+          const corp = getCorporateInfo(row.serie);
 
           const rowData: any = {};
 
@@ -653,6 +1023,8 @@ const App: React.FC = () => {
                    else if (col.key === 'mpsIp') val = ndd.mpsIp;
               } else if (col.type === 'map') {
                    val = map[col.key] || '';
+              } else if (col.type === 'corporate') {
+                   val = corp ? (corp as any)[col.key] || '-' : (corporateData.size > 0 ? 'Fora do contrato' : '-');
               } else {
                    val = row[col.key] || '';
               }
@@ -799,6 +1171,10 @@ const App: React.FC = () => {
           bgColor = 'bg-purple-50/80';
           borderColor = 'border-purple-100';
           textColor = 'text-purple-900';
+      } else if (col.type === 'corporate') {
+          bgColor = 'bg-amber-50/80';
+          borderColor = 'border-amber-100';
+          textColor = 'text-amber-900';
       } else {
           if (col.key === 'tipo') content = addFilter(uniqueValues.tipo, filters.selectedTypes, v => setFilters(prev => ({...prev, selectedTypes: v})));
           else if (col.key === 'statusOs') content = addFilter(uniqueValues.status, filters.selectedStatus, v => setFilters(prev => ({...prev, selectedStatus: v})));
@@ -825,6 +1201,7 @@ const App: React.FC = () => {
       const sds = cached?.sds ?? getSdsInfo(row.serie);
       const ndd = cached?.ndd ?? getNddInfo(row.serie);
       const map = cached?.map ?? getMapInfo(row.serie);
+      const corp = cached !== undefined ? cached.corp : getCorporateInfo(row.serie);
       let val: React.ReactNode = '';
       let cellClass = '';
       let title = '';
@@ -855,6 +1232,18 @@ const App: React.FC = () => {
           title = String(val);
           cellClass = 'border-r border-purple-100 bg-purple-50/30 text-purple-900 group-hover:bg-purple-100/50';
           val = <div className="max-w-[200px] truncate">{val}</div>;
+      } else if (col.type === 'corporate') {
+          cellClass = 'border-r border-amber-100 bg-amber-50/30 text-amber-900 group-hover:bg-amber-100/50';
+          if (!corp) {
+              val = corporateData.size > 0 ? <span className="text-xs text-gray-400 italic">Fora do contrato</span> : '-';
+          } else if (col.key === 'status') {
+              const isAtivo = corp.status.toLowerCase().includes('ativo');
+              val = <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${isAtivo ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>{corp.status || '-'}</span>;
+          } else {
+              val = (corp as any)[col.key] || '-';
+              title = String(val);
+              val = <div className="max-w-[200px] truncate">{val}</div>;
+          }
       } else {
           val = row[col.key];
           if (col.key === 'serie') cellClass = "font-mono";
@@ -872,7 +1261,7 @@ const App: React.FC = () => {
               {val}
           </td>
       );
-  }, [getSdsInfo, getNddInfo, getMapInfo, rowInfoCache]);
+  }, [getSdsInfo, getNddInfo, getMapInfo, getCorporateInfo, rowInfoCache, corporateData]);
 
   return (
     <div className="h-full flex flex-col bg-white">
@@ -924,33 +1313,64 @@ const App: React.FC = () => {
         {/* Secondary Inputs */}
         <div className="flex flex-wrap items-center gap-3 bg-gray-50 p-2 rounded-lg border border-gray-200 shadow-inner">
            <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
-               <div className="flex items-center gap-1">
+               <label className="flex items-center gap-1 cursor-pointer" title={showSds ? 'Ocultar dados SDS' : 'Exibir dados SDS'}>
+                 <input type="checkbox" checked={showSds} onChange={e => setShowSds(e.target.checked)}
+                   className="w-3.5 h-3.5 rounded border-gray-400 text-blue-600 focus:ring-blue-400 focus:ring-1 cursor-pointer" />
                  <span className="text-[10px] font-bold text-gray-500 uppercase">2. Base SDS</span>
                  {sdsData.size > 0 && (
-                   <span className="text-[9px] font-bold text-white bg-blue-500 rounded-full px-1.5 py-0.5" title={`${sdsData.size} registros SDS`}>{sdsData.size}</span>
+                   <span className={`text-[9px] font-bold text-white rounded-full px-1.5 py-0.5 transition-colors ${showSds ? 'bg-blue-500' : 'bg-gray-400'}`} title={`${sdsData.size} registros SDS`}>{sdsData.size}</span>
                  )}
-               </div>
+               </label>
                <input ref={sdsInputRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleSdsSelect} className="text-xs text-gray-500 w-40 file:bg-gray-200 file:text-gray-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-gray-300"/>
            </div>
            <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
-               <div className="flex items-center gap-1">
+               <label className="flex items-center gap-1 cursor-pointer" title={showNdd ? 'Ocultar dados MPS' : 'Exibir dados MPS'}>
+                 <input type="checkbox" checked={showNdd} onChange={e => setShowNdd(e.target.checked)}
+                   className="w-3.5 h-3.5 rounded border-gray-400 text-green-600 focus:ring-green-400 focus:ring-1 cursor-pointer" />
                  <span className="text-[10px] font-bold text-green-700 uppercase">3. Base NDD MPS</span>
                  {nddData.size > 0 && (
-                   <span className="text-[9px] font-bold text-white bg-green-500 rounded-full px-1.5 py-0.5" title={`${nddData.size} registros MPS`}>{nddData.size}</span>
+                   <span className={`text-[9px] font-bold text-white rounded-full px-1.5 py-0.5 transition-colors ${showNdd ? 'bg-green-500' : 'bg-gray-400'}`} title={`${nddData.size} registros MPS`}>{nddData.size}</span>
                  )}
-               </div>
+               </label>
                <input ref={nddInputRef} type="file" accept=".csv" onChange={handleNddSelect} className="text-xs text-gray-500 w-40 file:bg-green-100 file:text-green-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-green-200"/>
            </div>
            <div className="flex items-center gap-2 pr-3 border-r border-gray-300">
-               <div className="flex items-center gap-1">
+               <label className="flex items-center gap-1 cursor-pointer" title={showMap ? 'Ocultar dados Mapa' : 'Exibir dados Mapa'}>
+                 <input type="checkbox" checked={showMap} onChange={e => setShowMap(e.target.checked)}
+                   className="w-3.5 h-3.5 rounded border-gray-400 text-purple-600 focus:ring-purple-400 focus:ring-1 cursor-pointer" />
                  <span className="text-[10px] font-bold text-purple-700 uppercase">4. Mapa</span>
                  {mapData.size > 0 && (
-                   <span className="text-[9px] font-bold text-white bg-purple-500 rounded-full px-1.5 py-0.5" title={`${mapData.size} registros Mapa`}>{mapData.size}</span>
+                   <span className={`text-[9px] font-bold text-white rounded-full px-1.5 py-0.5 transition-colors ${showMap ? 'bg-purple-500' : 'bg-gray-400'}`} title={`${mapData.size} registros Mapa`}>{mapData.size}</span>
                  )}
-               </div>
+               </label>
                <input ref={mapInputRef} type="file" accept=".xlsx,.xls,.xlsb" onChange={handleMapSelect} className="text-xs text-gray-500 w-40 file:bg-purple-100 file:text-purple-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-purple-200"/>
            </div>
-           
+           <div className="flex flex-col gap-1 pr-3 border-r border-gray-300">
+             <div className="flex items-center gap-2">
+               <label className="flex items-center gap-1 cursor-pointer" title={showCorp ? 'Ocultar dados Contrato' : 'Exibir dados Contrato'}>
+                 <input type="checkbox" checked={showCorp} onChange={e => setShowCorp(e.target.checked)}
+                   className="w-3.5 h-3.5 rounded border-gray-400 text-amber-600 focus:ring-amber-400 focus:ring-1 cursor-pointer" />
+                 <span className="text-[10px] font-bold text-amber-700 uppercase">5. Contrato</span>
+                 {corporateData.size > 0 && (
+                   <span className={`text-[9px] font-bold text-white rounded-full px-1.5 py-0.5 transition-colors ${showCorp ? 'bg-amber-500' : 'bg-gray-400'}`} title={`${corporateData.size} equipamentos no contrato`}>{corporateData.size}</span>
+                 )}
+               </label>
+               <input ref={corpInputRef} type="file" accept=".xlsx,.xls,.xlsb,.xls" onChange={handleCorpSelect} className="text-xs text-gray-500 w-40 file:bg-amber-100 file:text-amber-700 file:border-0 file:rounded file:px-2 file:py-0.5 file:text-[10px] file:font-bold hover:file:bg-amber-200"/>
+             </div>
+             <div className="flex items-center gap-2">
+               <label className="flex items-center gap-1 cursor-pointer select-none" title="Quando ativo, valida os CEPs do contrato via ViaCEP e preenche os campos de endereço">
+                 <input type="checkbox" checked={useCepValidation} onChange={e => setUseCepValidation(e.target.checked)}
+                   className="w-3 h-3 rounded border-gray-400 text-amber-600 focus:ring-amber-400 focus:ring-1 cursor-pointer" />
+                 <span className="text-[9px] text-amber-700">Validar CEPs via ViaCEP</span>
+               </label>
+               {cepValidationProgress && (
+                 <span className="text-[9px] text-amber-600 font-semibold animate-pulse">
+                   {cepValidationProgress.done}/{cepValidationProgress.total} CEPs…
+                 </span>
+               )}
+             </div>
+           </div>
+
            <div className="flex items-center gap-2 text-xs ml-auto">
                <div className="flex items-center gap-1" title="Alert Threshold (Days)">
                    <div className="w-2 h-2 rounded-full bg-yellow-400"></div>
@@ -1021,48 +1441,101 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      {/* Table */}
-      <div className="flex-grow overflow-auto custom-scrollbar relative">
-          <table className="w-full border-collapse min-w-max">
-              <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm text-xs">
-                  <tr>
-                      {visibleColumns.map((col, index) => renderHeaderCell(col, index))}
-                  </tr>
-              </thead>
-              <tbody className="text-xs text-gray-700 bg-white divide-y divide-gray-100">
-                  {filteredData.length === 0 ? (
-                      <tr><td colSpan={visibleColumns.length} className="px-6 py-8 text-center text-gray-400 text-sm">Nenhum dado para exibir. Carregue relatórios para começar.</td></tr>
-                  ) : (
-                      pagedData.map((row) => (
-                          <tr key={row.id} className="hover:bg-blue-50 transition-colors group">
-                              {visibleColumns.map((col, index) => renderRowCell(row, col, index))}
-                          </tr>
-                      ))
-                  )}
-              </tbody>
-          </table>
+      {/* Tab Bar */}
+      <div className="bg-white border-b border-gray-200 px-4 flex items-center gap-1 flex-shrink-0 z-20">
+        {([
+          {
+            id: 'table' as const,
+            label: 'Relatórios',
+            activeColor: 'border-blue-600 text-blue-600',
+            badge: null as React.ReactNode,
+            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M3 14h18M3 6h18M3 18h18"/></svg>,
+          },
+          {
+            id: 'dashboard' as const,
+            label: 'Dashboard',
+            activeColor: 'border-purple-600 text-purple-600',
+            badge: filteredData.length > 0
+              ? <span className={`ml-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${activeTab === 'dashboard' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-500'}`}>{filteredData.length.toLocaleString('pt-BR')}</span>
+              : null,
+            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>,
+          },
+        ]).map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-bold border-b-2 -mb-px transition-colors ${
+              activeTab === tab.id
+                ? tab.activeColor
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            {tab.icon}
+            {tab.label}
+            {tab.badge}
+          </button>
+        ))}
       </div>
 
-      {/* Pagination */}
-      <div className="p-2 border-t bg-gray-50 flex justify-between items-center z-20">
-          <button 
-             onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-             disabled={currentPage === 1}
-             className="px-4 py-1 rounded bg-white border shadow-sm text-xs font-bold hover:bg-gray-100 disabled:opacity-50 transition"
-          >
-              Anterior
-          </button>
-          <span className="text-xs text-gray-600 font-medium">
-              Página {currentPage} de {Math.max(totalPages, 1)}
-          </span>
-          <button 
-             onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-             disabled={currentPage === totalPages || totalPages === 0}
-             className="px-4 py-1 rounded bg-white border shadow-sm text-xs font-bold hover:bg-gray-100 disabled:opacity-50 transition"
-          >
-              Próximo
-          </button>
-      </div>
+      {activeTab === 'table' && (
+        <>
+          {/* Corporate-only mode banner */}
+          {allData.length === 0 && corporateData.size > 0 && (
+            <div className="flex items-center gap-2 bg-amber-50 border-b border-amber-200 px-4 py-2 text-xs text-amber-800 flex-shrink-0">
+              <svg className="w-3.5 h-3.5 flex-shrink-0 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+              <span>
+                <strong>Modo Contrato</strong> — exibindo {corporateData.size.toLocaleString('pt-BR')} equipamentos do arquivo de contrato.
+                Carregue a <strong>Pasta Relatórios</strong> para cruzar com OS abertas.
+              </span>
+            </div>
+          )}
+          {/* Table */}
+          <div className="flex-grow overflow-auto custom-scrollbar relative">
+              <table className="w-full border-collapse min-w-max">
+                  <thead className="bg-gray-50 sticky top-0 z-20 shadow-sm text-xs">
+                      <tr>
+                          {visibleColumns.map((col, index) => renderHeaderCell(col, index))}
+                      </tr>
+                  </thead>
+                  <tbody className="text-xs text-gray-700 bg-white divide-y divide-gray-100">
+                      {filteredData.length === 0 ? (
+                          <tr><td colSpan={visibleColumns.length} className="px-6 py-8 text-center text-gray-400 text-sm">
+                            {corporateData.size > 0 ? 'Nenhum equipamento corresponde ao filtro atual.' : 'Nenhum dado para exibir. Carregue a Pasta Relatórios ou o arquivo de Contrato para começar.'}
+                          </td></tr>
+                      ) : (
+                          pagedData.map((row) => (
+                              <tr key={row.id} className="hover:bg-blue-50 transition-colors group">
+                                  {visibleColumns.map((col, index) => renderRowCell(row, col, index))}
+                              </tr>
+                          ))
+                      )}
+                  </tbody>
+              </table>
+          </div>
+
+          {/* Pagination */}
+          <div className="p-2 border-t bg-gray-50 flex justify-between items-center z-20">
+              <button
+                 onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                 disabled={currentPage === 1}
+                 className="px-4 py-1 rounded bg-white border shadow-sm text-xs font-bold hover:bg-gray-100 disabled:opacity-50 transition"
+              >
+                  Anterior
+              </button>
+              <span className="text-xs text-gray-600 font-medium">
+                  Página {currentPage} de {Math.max(totalPages, 1)}
+              </span>
+              <button
+                 onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                 disabled={currentPage === totalPages || totalPages === 0}
+                 className="px-4 py-1 rounded bg-white border shadow-sm text-xs font-bold hover:bg-gray-100 disabled:opacity-50 transition"
+              >
+                  Próximo
+              </button>
+          </div>
+        </>
+      )}
+      {activeTab === 'dashboard' && <Dashboard stats={dashboardStats} />}
 
       {/* Column Config Modal */}
       <Modal 

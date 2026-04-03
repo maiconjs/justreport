@@ -1,6 +1,13 @@
 import * as XLSX from 'xlsx';
-import { ReportItem, MapColumnConfig, MapInfo } from '../types';
+// Add Windows-1252 codepage support to SheetJS so pt-BR accented characters
+// (ç, ã, é, ó…) decode correctly from legacy .xls (BIFF) files.
+// This only ADDS support — it does not replace or suppress anything in SheetJS.
+import * as CPExcel from 'xlsx/dist/cpexcel.full.mjs';
+if (typeof XLSX.set_cptable === 'function') XLSX.set_cptable(CPExcel);
+
+import { ReportItem, MapColumnConfig, MapInfo, CorporateInfo } from '../types';
 import { parseDateRobust, formatDate, excelDateToJSDate } from '../utils/dateUtils';
+import { parseEnderecoInstalacao } from '../utils/addressUtils';
 
 const columnMap = {
   dataCriacao: ['Data de Criação', 'Data Criação', 'Data Abertura'],
@@ -163,6 +170,79 @@ export const processReportData = (rawData: any[], fileName: string): ReportItem[
       _rawCriacao: parseDateRobust(rawCriacao),
       _rawConclusao: parseDateRobust(rawConclusao)
     };
+  });
+};
+
+// Corporate planilha: skip 4 header rows, cols: 1=serial, 2=status, 3=model, 5=cliente, 6=endereco, 18=dataInstalacao
+// Filters out software-only rows (no physical serial) and maps by normalized serial.
+export const processCorporateFile = async (file: File): Promise<Map<string, CorporateInfo>> => {
+  const rows = await readRawExcel(file, 4);
+  const map = new Map<string, CorporateInfo>();
+  const normalizeSerial = (v: any) => String(v || '').replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+
+  rows.forEach(row => {
+    const serial = normalizeSerial(row[1]);
+    if (!serial) return;
+    const modelo = String(row[3] || '').trim();
+    // Skip pure software items (no physical hardware)
+    if (!modelo || modelo.toUpperCase().includes('SOFTWARE') || modelo.toUpperCase().includes('SW BILHETAGEM')) return;
+    const status = String(row[2] || '').trim();
+    const clienteInstalacao = String(row[5] || '').trim();
+    const enderecoInstalacao = String(row[6] || '').trim();
+    const parsed = parseEnderecoInstalacao(enderecoInstalacao);
+    const rawDate = row[18];
+    let dataInstalacao = '-';
+    if (rawDate instanceof Date && !isNaN(rawDate.getTime())) {
+      dataInstalacao = rawDate.toLocaleDateString('pt-BR');
+    } else if (rawDate) {
+      dataInstalacao = String(rawDate).trim();
+    }
+    map.set(serial, {
+      serial, status, modelo, enderecoInstalacao,
+      logradouro: parsed.logradouro,
+      complemento: parsed.complemento,
+      bairro: parsed.bairro,
+      cidade: parsed.cidade,
+      uf: parsed.uf,
+      cep: parsed.cep,
+      cepStatus: 'unchecked',
+      dataInstalacao, clienteInstalacao, inContract: true,
+    });
+  });
+  return map;
+};
+
+// Reads a file as an array-of-arrays (raw rows), skipping N header rows.
+// cellDates:true returns Date objects for date cells; raw:true preserves them
+// (raw:false would let SheetJS reformat dates as locale strings, breaking pt-BR format).
+export const readRawExcel = async (file: File, headerRowsToSkip = 1): Promise<any[][]> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result;
+        let workbook: XLSX.WorkBook;
+        if (file.name.toLowerCase().match(/\.(xlsx|xlsb|xls)$/)) {
+          workbook = XLSX.read(data as ArrayBuffer, { type: 'array', cellDates: true });
+        } else {
+          // CSV — read as text
+          workbook = XLSX.read(data as string, { type: 'string', raw: true, FS: ';' });
+        }
+        const ws = workbook.Sheets[workbook.SheetNames[0]];
+        // raw:true keeps Date objects intact; without it SheetJS formats dates as US strings
+        const parsed: any[][] = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true }) as any[][];
+        const rows = parsed.slice(headerRowsToSkip).filter(r => Array.isArray(r) && r.some(c => c !== ''));
+        resolve(rows);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    if (file.name.toLowerCase().match(/\.(xlsx|xlsb|xls)$/)) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file, 'ISO-8859-1');
+    }
   });
 };
 

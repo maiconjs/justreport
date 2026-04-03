@@ -85,10 +85,39 @@ export interface MapColumnConfig {
   strict: boolean;
 }
 
+export type CepStatus = 'unchecked' | 'valid' | 'invalid';
+
+export interface CorporateInfo {
+  serial: string;
+  status: string;         // 'Ativo' | 'Inativo'
+  modelo: string;
+  enderecoInstalacao: string;  // raw original
+  // Parsed/validated address fields
+  logradouro: string;
+  complemento: string;
+  bairro: string;
+  cidade: string;
+  uf: string;
+  cep: string;
+  cepStatus: CepStatus;
+  dataInstalacao: string;
+  clienteInstalacao: string;
+  inContract: boolean;
+}
+
+export interface CepInvalidEntry {
+  serial: string;
+  cep: string;
+  enderecoRaw: string;
+  cidade: string;
+  uf: string;
+  modelo: string;
+}
+
 export interface ColumnDef {
   id: string;
   label: string;
   visible: boolean;
-  type: 'sds' | 'map' | 'standard' | 'ndd';
+  type: 'sds' | 'map' | 'standard' | 'ndd' | 'corporate';
   key: string; // Key in the respective data object
 }
