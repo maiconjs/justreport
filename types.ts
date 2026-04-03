@@ -103,6 +103,7 @@ export interface CorporateInfo {
   dataInstalacao: string;
   clienteInstalacao: string;
   inContract: boolean;
+  cepCorrection?: CepCorrectionEntry;
 }
 
 export interface CepInvalidEntry {
@@ -112,6 +113,13 @@ export interface CepInvalidEntry {
   cidade: string;
   uf: string;
   modelo: string;
+}
+
+export interface CepCorrectionEntry {
+  serial: string;
+  cep: string;
+  original: string;
+  corrected: string;
 }
 
 export interface ColumnDef {

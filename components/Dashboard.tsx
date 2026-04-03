@@ -1,13 +1,19 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
-import { CepInvalidEntry } from '../types';
+import { CepInvalidEntry, CepCorrectionEntry } from '../types';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface StatEntry { name: string; count: number; }
+
+export interface SerialDetail {
+  sdsStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData';
+  nddStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData';
+  billingStatus: 'active' | 'noRecent' | 'never' | null;
+}
 
 export interface LocationBreakdown {
   name: string;
@@ -17,6 +23,7 @@ export interface LocationBreakdown {
   billing: { active: number; noRecent: number; never: number };
   situacao: StatEntry[];
   serials: string[];
+  serialDetails: Record<string, SerialDetail>;
 }
 
 export interface DashboardStats {
@@ -354,6 +361,39 @@ const LocationCard: React.FC<LocationCardProps> = ({ loc, sdsLoaded, nddLoaded, 
   );
 };
 
+// ── FilterRow (clickable stat row for interactive filtering) ──────────────────
+
+interface FilterRowProps {
+  label: string;
+  value: number;
+  color: string;
+  total: number;
+  isActive: boolean;
+  onClick: () => void;
+}
+
+const FilterRow: React.FC<FilterRowProps> = ({ label, value, color, total, isActive, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center gap-2 w-full rounded-lg px-2 py-1.5 transition-all text-left border-2 ${
+      isActive ? '' : 'border-transparent hover:bg-white/70'
+    }`}
+    style={isActive ? { borderColor: color, backgroundColor: color + '22' } : {}}
+  >
+    <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
+    <div className="text-xs text-gray-700 flex-grow">{label}</div>
+    <div className="text-xs font-bold text-gray-800">{value.toLocaleString('pt-BR')}</div>
+    <div className="text-[10px] text-gray-400 w-8 text-right">
+      {total > 0 ? `${Math.round(value / total * 100)}%` : '–'}
+    </div>
+    {isActive && (
+      <svg className="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" style={{ color }}>
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M5 13l4 4L19 7"/>
+      </svg>
+    )}
+  </button>
+);
+
 // ── LocationDetailModal ───────────────────────────────────────────────────────
 
 interface LocationDetailModalProps {
@@ -363,7 +403,88 @@ interface LocationDetailModalProps {
   onClose: () => void;
 }
 
+const PAGE_SIZE = 50;
+
 const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoaded, nddLoaded, onClose }) => {
+  const [sdsFilter, setSdsFilter]         = useState<'all' | 'monitored' | 'alert' | 'notMonitored'>('all');
+  const [nddFilter, setNddFilter]         = useState<'all' | 'monitored' | 'alert' | 'notMonitored'>('all');
+  const [billingFilter, setBillingFilter] = useState<'all' | 'active' | 'noRecent' | 'never'>('all');
+  const [showSds, setShowSds]             = useState(true);
+  const [showNdd, setShowNdd]             = useState(true);
+  const [showBilling, setShowBilling]     = useState(true);
+  const [search, setSearch]               = useState('');
+  const [page, setPage]                   = useState(1);
+  const [showDuplicatesOnly, setShowDuplicatesOnly] = useState(false);
+
+  // Reset all state when the location changes
+  useEffect(() => {
+    setSdsFilter('all');
+    setNddFilter('all');
+    setBillingFilter('all');
+    setShowSds(true);
+    setShowNdd(true);
+    setShowBilling(true);
+    setSearch('');
+    setPage(1);
+    setShowDuplicatesOnly(false);
+  }, [loc?.name]);
+
+  const uniqueSerials = useMemo(() => (loc ? [...new Set(loc.serials)] : []), [loc]);
+
+  const duplicates = useMemo(() => {
+    if (!loc) return [];
+    const counts: Record<string, number> = {};
+    loc.serials.forEach(s => { counts[s] = (counts[s] || 0) + 1; });
+    return Object.keys(counts).filter(k => counts[k] > 1);
+  }, [loc]);
+
+  const numMissingSerials = loc ? loc.total - loc.serials.length : 0;
+
+  const filteredSerials = useMemo(() => {
+    if (!loc) return [];
+    let list = uniqueSerials;
+    if (showDuplicatesOnly) {
+      list = duplicates;
+    }
+    return list.filter(serial => {
+      const d = loc.serialDetails?.[serial];
+      if (sdsFilter     !== 'all' && (!d || d.sdsStatus     !== sdsFilter))     return false;
+      if (nddFilter     !== 'all' && (!d || d.nddStatus     !== nddFilter))     return false;
+      if (billingFilter !== 'all' && (!d || d.billingStatus !== billingFilter)) return false;
+      if (search && !serial.toLowerCase().includes(search.toLowerCase()))       return false;
+      return true;
+    });
+  }, [loc, uniqueSerials, duplicates, showDuplicatesOnly, sdsFilter, nddFilter, billingFilter, search]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredSerials.length / PAGE_SIZE));
+  const safePage   = Math.min(page, totalPages);
+  const pageSerials = filteredSerials.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+
+  const hasFilters = sdsFilter !== 'all' || nddFilter !== 'all' || billingFilter !== 'all' || search !== '';
+
+  const clearFilters = () => {
+    setSdsFilter('all'); setNddFilter('all'); setBillingFilter('all');
+    setSearch(''); setPage(1);
+  };
+
+  const toggleSds = (s: 'monitored' | 'alert' | 'notMonitored') => {
+    setSdsFilter(p => p === s ? 'all' : s); setPage(1);
+  };
+  const toggleNdd = (s: 'monitored' | 'alert' | 'notMonitored') => {
+    setNddFilter(p => p === s ? 'all' : s); setPage(1);
+  };
+  const toggleBilling = (s: 'active' | 'noRecent' | 'never') => {
+    setBillingFilter(p => p === s ? 'all' : s); setPage(1);
+  };
+
+  // Pagination page number list (max 7 visible)
+  const getPageNumbers = (cur: number, total: number): (number | null)[] => {
+    if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+    if (cur <= 4)            return [1, 2, 3, 4, 5, null, total];
+    if (cur >= total - 3)    return [1, null, total - 4, total - 3, total - 2, total - 1, total];
+    return [1, null, cur - 1, cur, cur + 1, null, total];
+  };
+
   if (!loc) return null;
 
   const sdsData = [
@@ -378,87 +499,128 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
     { name: 'Não Monitorado', value: loc.ndd.notMonitored, color: C.red    },
   ].filter(d => d.value > 0);
 
-  const billingData = [
-    { name: 'Ativa',           value: loc.billing.active,  color: C.green  },
-    { name: 'Sem Rec.',        value: loc.billing.noRecent, color: C.yellow },
-    { name: 'Nunca Bilhetado', value: loc.billing.never,   color: C.red    },
+  const billingItems = [
+    { key: 'active',   name: 'Ativa',           value: loc.billing.active,   color: C.green  },
+    { key: 'noRecent', name: 'Sem Rec.',         value: loc.billing.noRecent, color: C.yellow },
+    { key: 'never',    name: 'Nunca Bilhetado',  value: loc.billing.never,    color: C.red    },
   ].filter(d => d.value > 0);
 
   const billingTotal = loc.billing.active + loc.billing.noRecent + loc.billing.never;
   const sdsKnown = loc.total - loc.sds.noData;
   const nddKnown = loc.total - loc.ndd.noData;
 
-  const StatRow: React.FC<{ label: string; value: number; color: string; total: number }> = ({ label, value, color, total }) => (
-    <div className="flex items-center gap-2">
-      <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: color }} />
-      <div className="text-xs text-gray-700 flex-grow">{label}</div>
-      <div className="text-xs font-bold text-gray-800">{value.toLocaleString('pt-BR')}</div>
-      <div className="text-[10px] text-gray-400 w-8 text-right">{total > 0 ? `${Math.round(value / total * 100)}%` : '–'}</div>
-    </div>
-  );
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col animate-fade-in-up">
 
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-gray-100 flex items-start justify-between">
+        {/* ── Header ── */}
+        <div className="px-6 py-4 border-b border-gray-100 flex items-start justify-between flex-shrink-0">
           <div>
             <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">Detalhes do Contrato / Local</div>
             <h2 className="text-xl font-extrabold text-gray-800 mt-0.5">{loc.name}</h2>
-            <div className="flex items-center gap-3 mt-1">
+            <div className="flex items-center gap-3 mt-1 flex-wrap">
               <span className="text-sm text-gray-500">{loc.total.toLocaleString('pt-BR')} equipamentos</span>
-              {loc.serials.length > 0 && (
+              {uniqueSerials.length > 0 && (
                 <span className="text-xs bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full font-semibold">
-                  {loc.serials.length} seriais únicos
+                  {uniqueSerials.length} seriais únicos
                 </span>
+              )}
+              {numMissingSerials > 0 && (
+                <span className="text-xs bg-red-50 text-red-700 px-2 py-0.5 rounded-full font-bold shadow-sm" title="Equipamentos cujas linhas no relatório não possuem um número de série válido">
+                  ⚠️ {numMissingSerials} sem identificação
+                </span>
+              )}
+              {duplicates.length > 0 && (
+                <button 
+                  onClick={() => { setShowDuplicatesOnly(!showDuplicatesOnly); setPage(1); }}
+                  className={`text-xs px-2 py-0.5 rounded-full font-bold shadow-sm transition-colors border ${
+                    showDuplicatesOnly 
+                      ? 'bg-amber-500 text-white border-amber-600' 
+                      : 'bg-amber-50 text-amber-700 border-transparent hover:bg-amber-100'
+                  }`}
+                  title="Clique para filtrar a visualização pelos seriais duplicados"
+                >
+                  {showDuplicatesOnly ? 'Ocultar duplicados' : `⚠️ ${duplicates.length} duplicidades`}
+                </button>
               )}
             </div>
           </div>
           <button onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg p-1.5 transition-colors">
+            className="text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg p-1.5 transition-colors flex-shrink-0">
             {Ico.close}
           </button>
         </div>
 
-        {/* Scrollable body */}
+        {/* ── Section-visibility checkboxes ── */}
+        {(sdsLoaded || nddLoaded) && (
+          <div className="px-6 py-2.5 border-b border-gray-100 bg-gray-50/60 flex items-center gap-5 flex-shrink-0 flex-wrap">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Exibir:</span>
+            {sdsLoaded && (
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input type="checkbox" checked={showSds}
+                  onChange={e => { setShowSds(e.target.checked); if (!e.target.checked) setSdsFilter('all'); }}
+                  className="w-3.5 h-3.5 accent-blue-600" />
+                <span className="text-xs font-semibold text-blue-700">Monitoramento SDS</span>
+              </label>
+            )}
+            {nddLoaded && (
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input type="checkbox" checked={showNdd}
+                  onChange={e => { setShowNdd(e.target.checked); if (!e.target.checked) setNddFilter('all'); }}
+                  className="w-3.5 h-3.5 accent-teal-600" />
+                <span className="text-xs font-semibold text-teal-700">Monitoramento MPS</span>
+              </label>
+            )}
+            {nddLoaded && (
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input type="checkbox" checked={showBilling}
+                  onChange={e => { setShowBilling(e.target.checked); if (!e.target.checked) setBillingFilter('all'); }}
+                  className="w-3.5 h-3.5 accent-purple-600" />
+                <span className="text-xs font-semibold text-purple-700">Bilhetagem MPS</span>
+              </label>
+            )}
+            {hasFilters && (
+              <button onClick={clearFilters}
+                className="ml-auto flex items-center gap-1 text-[10px] font-bold text-red-500 hover:text-red-700 transition-colors">
+                <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+                Limpar filtros
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* ── Scrollable body ── */}
         <div className="overflow-y-auto flex-grow px-6 py-4 space-y-5 custom-scrollbar">
 
           {/* Monitoring charts */}
-          {(sdsLoaded || nddLoaded) && (
-            <div className={`grid gap-4 ${sdsLoaded && nddLoaded ? 'grid-cols-2' : 'grid-cols-1'}`}>
+          {(sdsLoaded || nddLoaded) && (showSds || showNdd) && (
+            <div className={`grid gap-4 ${(sdsLoaded && showSds) && (nddLoaded && showNdd) ? 'grid-cols-2' : 'grid-cols-1'}`}>
 
-              {sdsLoaded && sdsData.length > 0 && (
+              {sdsLoaded && showSds && sdsData.length > 0 && (
                 <div className="bg-blue-50/50 rounded-xl p-4 border border-blue-100">
-                  <div className="text-xs font-bold text-blue-800 uppercase tracking-wide mb-3">Monitoramento SDS</div>
-                  <DonutWithCenter
-                    data={sdsData}
-                    centerValue={loc.total}
-                    centerLabel="equip."
-                    height={170}
-                  />
-                  <div className="space-y-1.5 mt-3">
-                    <StatRow label="Monitorados"     value={loc.sds.monitored}    color={C.green}  total={sdsKnown} />
-                    <StatRow label="Alerta"          value={loc.sds.alert}        color={C.yellow} total={sdsKnown} />
-                    <StatRow label="Não Monitorados" value={loc.sds.notMonitored} color={C.red}    total={sdsKnown} />
+                  <div className="text-xs font-bold text-blue-800 uppercase tracking-wide mb-1">Monitoramento SDS</div>
+                  <div className="text-[9px] text-blue-400 mb-3">Clique em uma linha para filtrar os seriais</div>
+                  <DonutWithCenter data={sdsData} centerValue={loc.total} centerLabel="equip." height={160} />
+                  <div className="space-y-0.5 mt-3">
+                    <FilterRow label="Monitorados"     value={loc.sds.monitored}    color={C.green}  total={sdsKnown} isActive={sdsFilter === 'monitored'}    onClick={() => toggleSds('monitored')} />
+                    <FilterRow label="Alerta"          value={loc.sds.alert}        color={C.yellow} total={sdsKnown} isActive={sdsFilter === 'alert'}        onClick={() => toggleSds('alert')} />
+                    <FilterRow label="Não Monitorados" value={loc.sds.notMonitored} color={C.red}    total={sdsKnown} isActive={sdsFilter === 'notMonitored'} onClick={() => toggleSds('notMonitored')} />
                   </div>
                 </div>
               )}
 
-              {nddLoaded && nddChartData.length > 0 && (
+              {nddLoaded && showNdd && nddChartData.length > 0 && (
                 <div className="bg-teal-50/50 rounded-xl p-4 border border-teal-100">
-                  <div className="text-xs font-bold text-teal-800 uppercase tracking-wide mb-3">Monitoramento MPS</div>
-                  <DonutWithCenter
-                    data={nddChartData}
-                    centerValue={loc.total}
-                    centerLabel="equip."
-                    height={170}
-                  />
-                  <div className="space-y-1.5 mt-3">
-                    <StatRow label="Monitorados"     value={loc.ndd.monitored}    color={C.green}  total={nddKnown} />
-                    <StatRow label="Alerta"          value={loc.ndd.alert}        color={C.yellow} total={nddKnown} />
-                    <StatRow label="Não Monitorados" value={loc.ndd.notMonitored} color={C.red}    total={nddKnown} />
+                  <div className="text-xs font-bold text-teal-800 uppercase tracking-wide mb-1">Monitoramento MPS</div>
+                  <div className="text-[9px] text-teal-400 mb-3">Clique em uma linha para filtrar os seriais</div>
+                  <DonutWithCenter data={nddChartData} centerValue={loc.total} centerLabel="equip." height={160} />
+                  <div className="space-y-0.5 mt-3">
+                    <FilterRow label="Monitorados"     value={loc.ndd.monitored}    color={C.green}  total={nddKnown} isActive={nddFilter === 'monitored'}    onClick={() => toggleNdd('monitored')} />
+                    <FilterRow label="Alerta"          value={loc.ndd.alert}        color={C.yellow} total={nddKnown} isActive={nddFilter === 'alert'}        onClick={() => toggleNdd('alert')} />
+                    <FilterRow label="Não Monitorados" value={loc.ndd.notMonitored} color={C.red}    total={nddKnown} isActive={nddFilter === 'notMonitored'} onClick={() => toggleNdd('notMonitored')} />
                   </div>
                 </div>
               )}
@@ -466,20 +628,29 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
           )}
 
           {/* Billing */}
-          {nddLoaded && billingTotal > 0 && (
+          {nddLoaded && showBilling && billingTotal > 0 && (
             <div className="bg-gray-50 rounded-xl p-4 border border-gray-200">
-              <div className="text-xs font-bold text-gray-600 uppercase tracking-wide mb-3">Bilhetagem MPS</div>
+              <div className="text-xs font-bold text-gray-600 uppercase tracking-wide mb-1">Bilhetagem MPS</div>
+              <div className="text-[9px] text-gray-400 mb-3">Clique em um card para filtrar os seriais</div>
               <div className="flex gap-3 mb-3">
-                {billingData.map(d => (
-                  <div key={d.name}
-                    className="flex-1 rounded-lg py-2 px-3 text-center"
-                    style={{ backgroundColor: d.color + '18', border: `1px solid ${d.color}30` }}>
+                {billingItems.map(d => (
+                  <button key={d.key}
+                    onClick={() => toggleBilling(d.key as 'active' | 'noRecent' | 'never')}
+                    className="flex-1 rounded-lg py-2 px-3 text-center border-2 transition-all hover:opacity-90"
+                    style={{
+                      backgroundColor: d.color + '18',
+                      borderColor: billingFilter === d.key ? d.color : 'transparent',
+                      boxShadow: billingFilter === d.key ? `0 0 0 2px ${d.color}40` : 'none',
+                    }}>
                     <div className="text-lg font-extrabold" style={{ color: d.color }}>
                       {d.value.toLocaleString('pt-BR')}
                     </div>
                     <div className="text-[9px] font-semibold text-gray-600">{d.name}</div>
                     <div className="text-[9px] text-gray-400">{Math.round(d.value / billingTotal * 100)}%</div>
-                  </div>
+                    {billingFilter === d.key && (
+                      <div className="mt-1 text-[8px] font-bold" style={{ color: d.color }}>✓ Filtro ativo</div>
+                    )}
+                  </button>
                 ))}
               </div>
               <HealthBar
@@ -517,30 +688,117 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
             </div>
           )}
 
-          {/* Equipment list */}
-          {loc.serials.length > 0 && (
+          {/* ── Serial list with search + pagination ── */}
+          {uniqueSerials.length > 0 && (
             <div>
-              <div className="text-xs font-bold text-gray-500 uppercase tracking-wide mb-2">
-                Seriais ({loc.serials.length})
-              </div>
-              <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto custom-scrollbar">
-                {loc.serials.slice(0, 60).map((s, i) => (
-                  <span key={i} className="px-2 py-0.5 bg-gray-100 text-gray-700 rounded text-[10px] font-mono">
-                    {s}
+              {/* List header */}
+              <div className="flex items-center justify-between gap-2 mb-3 flex-wrap gap-y-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wide">Seriais</div>
+                  <span className="text-[10px] text-gray-400">
+                    {hasFilters
+                      ? `${filteredSerials.length} de ${uniqueSerials.length}`
+                      : uniqueSerials.length.toLocaleString('pt-BR')}
                   </span>
-                ))}
-                {loc.serials.length > 60 && (
-                  <span className="px-2 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px] font-semibold">
-                    +{loc.serials.length - 60} mais
-                  </span>
-                )}
+                  {hasFilters && (
+                    <span className="text-[9px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold">
+                      Filtros ativos
+                    </span>
+                  )}
+                </div>
+                {/* Search input */}
+                <div className="relative">
+                  <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                  </svg>
+                  <input
+                    type="text"
+                    value={search}
+                    onChange={e => { setSearch(e.target.value); setPage(1); }}
+                    placeholder="Buscar serial..."
+                    className="pl-6 pr-6 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 w-40"
+                  />
+                  {search && (
+                    <button onClick={() => { setSearch(''); setPage(1); }}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
+                      </svg>
+                    </button>
+                  )}
+                </div>
               </div>
+
+              {filteredSerials.length === 0 ? (
+                <div className="text-center py-8 text-xs text-gray-400 italic bg-gray-50 rounded-xl">
+                  Nenhum serial corresponde aos filtros ativos.
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-1.5">
+                    {pageSerials.map((s, i) => {
+                      const isDup = duplicates.includes(s);
+                      return (
+                        <span key={i}
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-default relative transition-colors ${
+                            isDup 
+                              ? 'bg-amber-100/70 text-amber-800 border border-amber-300 shadow-sm pr-6' 
+                              : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
+                          }`}>
+                          {s}
+                          {isDup && <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[8px] font-bold px-1 rounded-full shadow-sm">x2+</span>}
+                        </span>
+                      );
+                    })}
+                  </div>
+
+                  {/* Pagination */}
+                  {totalPages > 1 && (
+                    <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
+                      <button
+                        onClick={() => setPage(p => Math.max(1, p - 1))}
+                        disabled={safePage === 1}
+                        className="px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        ← Anterior
+                      </button>
+
+                      <div className="flex items-center gap-1">
+                        {getPageNumbers(safePage, totalPages).map((p, i) =>
+                          p === null ? (
+                            <span key={`sep-${i}`} className="w-7 text-center text-xs text-gray-400">…</span>
+                          ) : (
+                            <button key={p} onClick={() => setPage(p)}
+                              className={`w-7 h-7 text-xs font-bold rounded-lg transition-colors ${
+                                safePage === p ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
+                              }`}>
+                              {p}
+                            </button>
+                          )
+                        )}
+                      </div>
+
+                      <button
+                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                        disabled={safePage === totalPages}
+                        className="px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                        Próximo →
+                      </button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-3 border-t border-gray-100 flex justify-end">
+        {/* ── Footer ── */}
+        <div className="px-6 py-3 border-t border-gray-100 flex items-center justify-between flex-shrink-0">
+          {hasFilters ? (
+            <button onClick={clearFilters}
+              className="text-xs font-bold text-red-500 hover:text-red-700 transition-colors">
+              Limpar todos os filtros
+            </button>
+          ) : <div />}
           <button onClick={onClose}
             className="px-4 py-2 text-sm font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors">
             Fechar
@@ -551,142 +809,284 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
   );
 };
 
-// ── CepQualitySection ─────────────────────────────────────────────────────────
+// ── LocationTable ─────────────────────────────────────────────────────────────
 
-interface CepQualityProps {
-  cepStats: {
-    total: number; valid: number; invalid: number; unchecked: number;
-    invalidList: CepInvalidEntry[];
-  };
+interface LocationTableProps {
+  locations: LocationBreakdown[];
+  sdsLoaded: boolean;
+  nddLoaded: boolean;
+  onRowClick: (loc: LocationBreakdown) => void;
 }
 
-const CepQualitySection: React.FC<CepQualityProps> = ({ cepStats }) => {
-  const [expanded, setExpanded] = useState(false);
-  const [ufFilter, setUfFilter] = useState('');
+const LocationTable: React.FC<LocationTableProps> = ({ locations, sdsLoaded, nddLoaded, onRowClick }) => {
+  const [search, setSearch]     = useState('');
+  const [sortKey, setSortKey]   = useState('total');
+  const [sortDir, setSortDir]   = useState<'asc' | 'desc'>('desc');
 
-  const validPct  = cepStats.total > 0 ? Math.round(cepStats.valid    / cepStats.total * 100) : 0;
-  const invalidPct = cepStats.total > 0 ? Math.round(cepStats.invalid / cepStats.total * 100) : 0;
+  const rows = useMemo(() => {
+    const getVal = (loc: LocationBreakdown): number | string => {
+      switch (sortKey) {
+        case 'name':             return loc.name;
+        case 'total':            return loc.total;
+        case 'sds.monitored':    return loc.sds.monitored;
+        case 'sds.alert':        return loc.sds.alert;
+        case 'sds.notMon':       return loc.sds.notMonitored;
+        case 'ndd.monitored':    return loc.ndd.monitored;
+        case 'ndd.alert':        return loc.ndd.alert;
+        case 'ndd.notMon':       return loc.ndd.notMonitored;
+        case 'bill.active':      return loc.billing.active;
+        case 'bill.noRecent':    return loc.billing.noRecent;
+        case 'bill.never':       return loc.billing.never;
+        default:                 return 0;
+      }
+    };
+    const filtered = search.trim()
+      ? locations.filter(l => l.name.toLowerCase().includes(search.toLowerCase()))
+      : locations;
+    return [...filtered].sort((a, b) => {
+      const va = getVal(a), vb = getVal(b);
+      if (typeof va === 'string') {
+        const cmp = (va as string).localeCompare(vb as string, 'pt-BR');
+        return sortDir === 'asc' ? cmp : -cmp;
+      }
+      return sortDir === 'asc'
+        ? (va as number) - (vb as number)
+        : (vb as number) - (va as number);
+    });
+  }, [locations, search, sortKey, sortDir]);
 
-  const filtered = useMemo(() =>
-    ufFilter
-      ? cepStats.invalidList.filter(e => e.uf === ufFilter)
-      : cepStats.invalidList,
-    [cepStats.invalidList, ufFilter]
+  const handleSort = (k: string) => {
+    if (sortKey === k) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(k); setSortDir('desc'); }
+  };
+
+  const SortArrow = ({ k }: { k: string }) => (
+    <span className="ml-0.5 opacity-50 text-[9px]">
+      {sortKey === k ? (sortDir === 'asc' ? '▲' : '▼') : '⇅'}
+    </span>
   );
 
-  const ufs = useMemo(() =>
-    [...new Set(cepStats.invalidList.map(e => e.uf).filter(Boolean))].sort(),
-    [cepStats.invalidList]
+  const Th: React.FC<{ label: string; k: string; cls?: string }> = ({ label, k, cls = '' }) => (
+    <th onClick={() => handleSort(k)}
+      className={`px-2 py-2 text-[10px] font-bold uppercase tracking-wide cursor-pointer select-none whitespace-nowrap transition-colors hover:opacity-80 ${cls}`}>
+      {label}<SortArrow k={k} />
+    </th>
   );
 
-  if (cepStats.unchecked > 0 && cepStats.valid === 0 && cepStats.invalid === 0) {
-    return (
-      <ChartCard title="Qualidade de Endereços (CEP)">
-        <div className="flex items-center gap-2 text-xs text-gray-400 italic py-4 justify-center">
-          <svg className="w-4 h-4 animate-spin text-amber-400" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/>
-          </svg>
-          Aguardando validação ViaCEP ({cepStats.unchecked} CEPs pendentes)...
-        </div>
-      </ChartCard>
+  // Colored count cell: shows value + percentage below, zeroes greyed out
+  const NumCell = ({ val, color, total }: { val: number; color: string; total: number }) => {
+    if (val === 0) return (
+      <td className="px-2 py-2 text-center text-xs text-gray-300 font-semibold">0</td>
     );
-  }
+    const pct = total > 0 ? Math.round(val / total * 100) : 0;
+    return (
+      <td className="px-2 py-2 text-center">
+        <div className="text-xs font-bold leading-tight" style={{ color }}>
+          {val.toLocaleString('pt-BR')}
+        </div>
+        <div className="text-[9px] text-gray-400 leading-tight">{pct}%</div>
+      </td>
+    );
+  };
+
+  // Small health indicator dot in the row
+  const healthColor = (loc: LocationBreakdown) => {
+    const sdsKnown = loc.total - loc.sds.noData;
+    const nddKnown = loc.total - loc.ndd.noData;
+    const rate = sdsKnown > 0 ? loc.sds.monitored / sdsKnown
+               : nddKnown > 0 ? loc.ndd.monitored / nddKnown
+               : null;
+    if (rate === null) return C.slate;
+    return rate >= 0.8 ? C.green : rate >= 0.5 ? C.yellow : C.red;
+  };
+
+  // Totals from visible rows
+  const totals = useMemo(() => rows.reduce((acc, l) => ({
+    total:           acc.total           + l.total,
+    sdsMonitored:    acc.sdsMonitored    + l.sds.monitored,
+    sdsAlert:        acc.sdsAlert        + l.sds.alert,
+    sdsNotMon:       acc.sdsNotMon       + l.sds.notMonitored,
+    nddMonitored:    acc.nddMonitored    + l.ndd.monitored,
+    nddAlert:        acc.nddAlert        + l.ndd.alert,
+    nddNotMon:       acc.nddNotMon       + l.ndd.notMonitored,
+    billActive:      acc.billActive      + l.billing.active,
+    billNoRecent:    acc.billNoRecent    + l.billing.noRecent,
+    billNever:       acc.billNever       + l.billing.never,
+  }), { total: 0, sdsMonitored: 0, sdsAlert: 0, sdsNotMon: 0,
+        nddMonitored: 0, nddAlert: 0, nddNotMon: 0,
+        billActive: 0, billNoRecent: 0, billNever: 0 }), [rows]);
+
+  const colSpanTotal = 2
+    + (sdsLoaded ? 3 : 0)
+    + (nddLoaded ? 6 : 0);
 
   return (
-    <ChartCard
-      title="Qualidade de Endereços (CEP)"
-      action={
-        cepStats.invalid > 0 ? (
-          <button
-            onClick={() => setExpanded(e => !e)}
-            className="text-[10px] font-bold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1 rounded-lg transition-colors"
-          >
-            {expanded ? 'Ocultar' : `Ver ${cepStats.invalid} inválidos`}
-          </button>
-        ) : undefined
-      }
-    >
-      {/* Summary bar */}
-      <div className="grid grid-cols-3 gap-3 mb-4">
-        <div className="rounded-xl p-3 bg-emerald-50 border border-emerald-100 text-center">
-          <div className="text-2xl font-extrabold text-emerald-700">{cepStats.valid.toLocaleString('pt-BR')}</div>
-          <div className="text-[10px] font-semibold text-emerald-600 mt-0.5">CEPs Válidos</div>
-          <div className="text-[10px] text-emerald-500">{validPct}%</div>
+    <div>
+      {/* Search + count */}
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <div className="relative">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none"
+            fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Filtrar localidade..."
+            className="pl-8 pr-7 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 w-52" />
+          {search && (
+            <button onClick={() => setSearch('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          )}
         </div>
-        <div className="rounded-xl p-3 bg-red-50 border border-red-100 text-center">
-          <div className="text-2xl font-extrabold text-red-700">{cepStats.invalid.toLocaleString('pt-BR')}</div>
-          <div className="text-[10px] font-semibold text-red-600 mt-0.5">CEPs Inválidos</div>
-          <div className="text-[10px] text-red-500">{invalidPct}%</div>
-        </div>
-        <div className="rounded-xl p-3 bg-gray-50 border border-gray-200 text-center">
-          <div className="text-2xl font-extrabold text-gray-600">{cepStats.unchecked.toLocaleString('pt-BR')}</div>
-          <div className="text-[10px] font-semibold text-gray-500 mt-0.5">Sem CEP</div>
-          <div className="text-[10px] text-gray-400">não validados</div>
-        </div>
+        <span className="text-[10px] text-gray-400">
+          {rows.length.toLocaleString('pt-BR')} {rows.length === 1 ? 'localidade' : 'localidades'}
+          {search && ` de ${locations.length}`}
+        </span>
       </div>
 
-      {/* Progress bar */}
-      <div className="h-2 rounded-full bg-gray-100 flex overflow-hidden mb-2">
-        <div className="bg-emerald-500 transition-all duration-700" style={{ width: `${validPct}%` }} />
-        <div className="bg-red-400 transition-all duration-700"    style={{ width: `${invalidPct}%` }} />
-      </div>
-      <div className="text-[10px] text-gray-400 mb-4">
-        {cepStats.total} CEPs únicos verificados via ViaCEP
-      </div>
+      {/* Table */}
+      <div className="max-h-[500px] overflow-y-auto custom-scrollbar rounded-xl border border-gray-200 shadow-sm">
+        <table className="w-full text-xs border-collapse">
+          <thead className="sticky top-0 z-10">
+            {/* Group header row */}
+            <tr>
+              <th colSpan={2}
+                className="bg-gray-100 border-b border-r border-gray-200 px-3 py-1.5 text-left text-[9px] font-bold text-gray-400 uppercase tracking-wider" />
+              {sdsLoaded && (
+                <th colSpan={3}
+                  className="bg-blue-100 border-b border-r border-blue-200 text-center text-[9px] font-bold text-blue-700 uppercase tracking-wider px-2 py-1.5">
+                  Monitoramento SDS
+                </th>
+              )}
+              {nddLoaded && (
+                <th colSpan={3}
+                  className="bg-teal-100 border-b border-r border-teal-200 text-center text-[9px] font-bold text-teal-700 uppercase tracking-wider px-2 py-1.5">
+                  Monitoramento MPS
+                </th>
+              )}
+              {nddLoaded && (
+                <th colSpan={3}
+                  className="bg-purple-100 border-b border-purple-200 text-center text-[9px] font-bold text-purple-700 uppercase tracking-wider px-2 py-1.5">
+                  Bilhetagem MPS
+                </th>
+              )}
+            </tr>
+            {/* Column header row */}
+            <tr className="bg-white shadow-sm">
+              <Th label="Localidade" k="name"
+                cls="text-left bg-gray-50 border-b border-r border-gray-200 pl-3 min-w-[180px] sticky left-0 z-20 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)]" />
+              <Th label="Total" k="total"
+                cls="text-center bg-gray-50 border-b border-r border-gray-200 text-gray-600 min-w-[52px]" />
+              {sdsLoaded && <>
+                <Th label="Monit." k="sds.monitored"  cls="text-center bg-blue-50/70  border-b border-blue-100  text-emerald-700 min-w-[60px]" />
+                <Th label="Alerta" k="sds.alert"      cls="text-center bg-blue-50/70  border-b border-blue-100  text-amber-700  min-w-[60px]" />
+                <Th label="N.Mon." k="sds.notMon"     cls="text-center bg-blue-50/70  border-b border-r border-blue-200  text-red-700    min-w-[60px]" />
+              </>}
+              {nddLoaded && <>
+                <Th label="Monit." k="ndd.monitored"  cls="text-center bg-teal-50/70  border-b border-teal-100  text-emerald-700 min-w-[60px]" />
+                <Th label="Alerta" k="ndd.alert"      cls="text-center bg-teal-50/70  border-b border-teal-100  text-amber-700  min-w-[60px]" />
+                <Th label="N.Mon." k="ndd.notMon"     cls="text-center bg-teal-50/70  border-b border-r border-teal-200  text-red-700    min-w-[60px]" />
+              </>}
+              {nddLoaded && <>
+                <Th label="Ativa"    k="bill.active"   cls="text-center bg-purple-50/70 border-b border-purple-100 text-emerald-700 min-w-[60px]" />
+                <Th label="Sem Rec." k="bill.noRecent" cls="text-center bg-purple-50/70 border-b border-purple-100 text-amber-700  min-w-[60px]" />
+                <Th label="Nunca"    k="bill.never"    cls="text-center bg-purple-50/70 border-b border-purple-100 text-red-700    min-w-[60px]" />
+              </>}
+            </tr>
+          </thead>
 
-      {/* Invalid list */}
-      {expanded && cepStats.invalid > 0 && (
-        <div>
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xs font-bold text-gray-600">Filtrar por UF:</span>
-            <select
-              value={ufFilter}
-              onChange={e => setUfFilter(e.target.value)}
-              className="border rounded text-xs px-2 py-0.5 bg-gray-50"
-            >
-              <option value="">Todos ({cepStats.invalid})</option>
-              {ufs.map(uf => (
-                <option key={uf} value={uf}>
-                  {uf} ({cepStats.invalidList.filter(e => e.uf === uf).length})
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-xs border-collapse">
-              <thead>
-                <tr className="bg-red-50 text-red-800">
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100 whitespace-nowrap">Série</th>
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100 whitespace-nowrap">CEP</th>
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100 whitespace-nowrap">UF</th>
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100 whitespace-nowrap">Cidade</th>
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100 whitespace-nowrap">Modelo</th>
-                  <th className="px-3 py-2 text-left font-bold border-b border-red-100">Endereço Original</th>
+          <tbody>
+            {rows.map((loc, i) => {
+              const sdsKnown     = loc.total - loc.sds.noData;
+              const nddKnown     = loc.total - loc.ndd.noData;
+              const billingTotal = loc.billing.active + loc.billing.noRecent + loc.billing.never;
+              const hColor       = healthColor(loc);
+              return (
+                <tr key={loc.name}
+                  onClick={() => onRowClick(loc)}
+                  className={`border-b border-gray-100 cursor-pointer transition-colors group hover:bg-blue-50/50 ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'}`}
+                >
+                  {/* Name cell — sticky */}
+                  <td className={`px-3 py-2.5 border-r border-gray-100 sticky left-0 z-10 transition-colors ${i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'} group-hover:bg-blue-50/50 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.05)]`}>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: hColor }} />
+                      <span className="font-semibold text-gray-800 truncate max-w-[200px]" title={loc.name}>
+                        {loc.name}
+                      </span>
+                      <svg className="w-3 h-3 text-blue-400 ml-auto flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                        fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/>
+                      </svg>
+                    </div>
+                  </td>
+                  {/* Total */}
+                  <td className="px-2 py-2.5 text-center border-r border-gray-100">
+                    <span className="font-extrabold text-blue-600">{loc.total.toLocaleString('pt-BR')}</span>
+                  </td>
+                  {/* SDS */}
+                  {sdsLoaded && <>
+                    <NumCell val={loc.sds.monitored}    color={C.green}  total={sdsKnown} />
+                    <NumCell val={loc.sds.alert}        color={C.yellow} total={sdsKnown} />
+                    <NumCell val={loc.sds.notMonitored} color={C.red}    total={sdsKnown} />
+                  </>}
+                  {/* MPS */}
+                  {nddLoaded && <>
+                    <NumCell val={loc.ndd.monitored}    color={C.green}  total={nddKnown} />
+                    <NumCell val={loc.ndd.alert}        color={C.yellow} total={nddKnown} />
+                    <NumCell val={loc.ndd.notMonitored} color={C.red}    total={nddKnown} />
+                  </>}
+                  {/* Billing */}
+                  {nddLoaded && <>
+                    <NumCell val={loc.billing.active}   color={C.green}  total={billingTotal} />
+                    <NumCell val={loc.billing.noRecent} color={C.yellow} total={billingTotal} />
+                    <NumCell val={loc.billing.never}    color={C.red}    total={billingTotal} />
+                  </>}
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-red-50">
-                {filtered.slice(0, 100).map((e, i) => (
-                  <tr key={i} className="hover:bg-red-50/50 transition-colors">
-                    <td className="px-3 py-1.5 font-mono text-gray-700">{e.serial}</td>
-                    <td className="px-3 py-1.5 font-bold text-red-600">{e.cep}</td>
-                    <td className="px-3 py-1.5 font-bold text-gray-700">{e.uf || '-'}</td>
-                    <td className="px-3 py-1.5 text-gray-700">{e.cidade || '-'}</td>
-                    <td className="px-3 py-1.5 text-gray-600">{e.modelo || '-'}</td>
-                    <td className="px-3 py-1.5 text-gray-500 max-w-xs truncate" title={e.enderecoRaw}>{e.enderecoRaw}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {filtered.length > 100 && (
-              <div className="text-xs text-gray-400 text-center mt-2 italic">
-                Mostrando 100 de {filtered.length} registros
-              </div>
+              );
+            })}
+
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={colSpanTotal}
+                  className="text-center py-10 text-xs text-gray-400 italic">
+                  Nenhuma localidade encontrada.
+                </td>
+              </tr>
             )}
-          </div>
-        </div>
-      )}
-    </ChartCard>
+          </tbody>
+
+          {/* Totals footer */}
+          {rows.length > 1 && (
+            <tfoot className="sticky bottom-0 z-10">
+              <tr className="bg-gray-100 border-t-2 border-gray-300 font-bold">
+                <td className="px-3 py-2 text-xs font-bold text-gray-600 sticky left-0 bg-gray-100 border-r border-gray-200">
+                  Total ({rows.length})
+                </td>
+                <td className="px-2 py-2 text-center text-xs font-extrabold text-blue-700 border-r border-gray-200">
+                  {totals.total.toLocaleString('pt-BR')}
+                </td>
+                {sdsLoaded && <>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.green  }}>{totals.sdsMonitored.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.yellow }}>{totals.sdsAlert.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold border-r border-gray-200" style={{ color: C.red    }}>{totals.sdsNotMon.toLocaleString('pt-BR')}</td>
+                </>}
+                {nddLoaded && <>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.green  }}>{totals.nddMonitored.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.yellow }}>{totals.nddAlert.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold border-r border-gray-200" style={{ color: C.red    }}>{totals.nddNotMon.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.green  }}>{totals.billActive.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.yellow }}>{totals.billNoRecent.toLocaleString('pt-BR')}</td>
+                  <td className="px-2 py-2 text-center text-xs font-bold" style={{ color: C.red    }}>{totals.billNever.toLocaleString('pt-BR')}</td>
+                </>}
+              </tr>
+            </tfoot>
+          )}
+        </table>
+      </div>
+    </div>
   );
 };
 
@@ -699,6 +1099,7 @@ interface Props {
 export const Dashboard: React.FC<Props> = ({ stats }) => {
   const [selectedLocation, setSelectedLocation] = useState<LocationBreakdown | null>(null);
   const [locationGroupBy, setLocationGroupBy] = useState<'contrato' | 'cidade'>('contrato');
+  const [locationView, setLocationView]         = useState<'cards' | 'table'>('cards');
   const [showAllLocations, setShowAllLocations] = useState(false);
 
   // ── Empty state ────────────────────────────────────────────────────────────
@@ -875,50 +1276,86 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
             )}
           </div>
 
-          {/* ── Location / Contract Cards ── */}
+          {/* ── Location / Contract Cards or Table ── */}
           {locations.length > 0 && (
             <ChartCard
               title={`Visão por ${locationGroupBy === 'contrato' ? 'Contrato' : 'Cidade'}`}
               action={
-                <div className="flex items-center gap-1 bg-gray-100 rounded-lg p-0.5">
-                  {(['contrato', 'cidade'] as const).map(g => (
+                <div className="flex items-center gap-2">
+                  {/* Group-by toggle */}
+                  <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
+                    {(['contrato', 'cidade'] as const).map(g => (
+                      <button key={g}
+                        onClick={() => { setLocationGroupBy(g); setShowAllLocations(false); }}
+                        className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors ${
+                          locationGroupBy === g ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                        }`}>
+                        {g === 'contrato' ? 'Contrato' : 'Cidade'}
+                      </button>
+                    ))}
+                  </div>
+                  {/* View-mode toggle */}
+                  <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
                     <button
-                      key={g}
-                      onClick={() => { setLocationGroupBy(g); setShowAllLocations(false); }}
-                      className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors ${
-                        locationGroupBy === g
-                          ? 'bg-white text-blue-700 shadow-sm'
-                          : 'text-gray-500 hover:text-gray-700'
-                      }`}
-                    >
-                      {g === 'contrato' ? 'Contrato' : 'Cidade'}
+                      onClick={() => setLocationView('cards')}
+                      title="Visualização em cartões"
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors flex items-center gap-1 ${
+                        locationView === 'cards' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                      }`}>
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                          d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>
+                      </svg>
+                      Cartões
                     </button>
-                  ))}
+                    <button
+                      onClick={() => setLocationView('table')}
+                      title="Visualização em tabela"
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold transition-colors flex items-center gap-1 ${
+                        locationView === 'table' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                      }`}>
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
+                          d="M3 10h18M3 14h18M10 4v16M3 6a2 2 0 012-2h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6z"/>
+                      </svg>
+                      Tabela
+                    </button>
+                  </div>
                 </div>
               }
             >
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
-                {visibleLocations.map(loc => (
-                  <LocationCard
-                    key={loc.name}
-                    loc={loc}
-                    sdsLoaded={stats.sdsLoaded}
-                    nddLoaded={stats.nddLoaded}
-                    onClick={() => setSelectedLocation(loc)}
-                  />
-                ))}
-              </div>
-              {locations.length > 18 && (
-                <div className="flex items-center justify-center mt-4">
-                  <button
-                    onClick={() => setShowAllLocations(prev => !prev)}
-                    className="text-xs font-bold text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-4 py-1.5 rounded-lg transition-colors"
-                  >
-                    {showAllLocations
-                      ? 'Ver menos'
-                      : `Ver todos os ${locations.length} ${locationGroupBy === 'contrato' ? 'contratos' : 'cidades'}`}
-                  </button>
-                </div>
+              {locationView === 'table' ? (
+                <LocationTable
+                  locations={locations}
+                  sdsLoaded={stats.sdsLoaded}
+                  nddLoaded={stats.nddLoaded}
+                  onRowClick={loc => setSelectedLocation(loc)}
+                />
+              ) : (
+                <>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
+                    {visibleLocations.map(loc => (
+                      <LocationCard
+                        key={loc.name}
+                        loc={loc}
+                        sdsLoaded={stats.sdsLoaded}
+                        nddLoaded={stats.nddLoaded}
+                        onClick={() => setSelectedLocation(loc)}
+                      />
+                    ))}
+                  </div>
+                  {locations.length > 18 && (
+                    <div className="flex items-center justify-center mt-4">
+                      <button
+                        onClick={() => setShowAllLocations(prev => !prev)}
+                        className="text-xs font-bold text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 px-4 py-1.5 rounded-lg transition-colors">
+                        {showAllLocations
+                          ? 'Ver menos'
+                          : `Ver todos os ${locations.length} ${locationGroupBy === 'contrato' ? 'contratos' : 'cidades'}`}
+                      </button>
+                    </div>
+                  )}
+                </>
               )}
             </ChartCard>
           )}
@@ -1041,11 +1478,6 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                 </ChartCard>
               )}
             </div>
-          )}
-
-          {/* ── CEP Quality Report ── */}
-          {stats.cepStats && stats.cepStats.total > 0 && (
-            <CepQualitySection cepStats={stats.cepStats} />
           )}
 
           {/* ── Top Contratos & Cidades ── */}

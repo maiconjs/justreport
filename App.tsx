@@ -2,13 +2,14 @@ import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { ReportItem, SdsInfo, NddInfo, MapInfo, CorporateInfo, CepInvalidEntry, FilterState, MapColumnConfig, ColumnDef } from './types';
+import { ReportItem, SdsInfo, NddInfo, MapInfo, CorporateInfo, CepInvalidEntry, CepCorrectionEntry, FilterState, MapColumnConfig, ColumnDef } from './types';
 import { readExcelFile, readNddCsv, processReportData, parseMapWorkbook, processMapSheet, mapColumnsConfig, processCorporateFile } from './services/excelService';
-import { bulkLookupCeps } from './services/viacepService';
+import { bulkLookupCeps, clearCepCache, getCacheStats } from './services/viacepService';
 import { parseDateRobust } from './utils/dateUtils';
 import { Modal } from './components/Modal';
 import { ProgressBar } from './components/ProgressBar';
 import { useDebounce } from './hooks/useDebounce';
+import { EnderecosTab } from './components/EnderecosTab';
 import { Dashboard, DashboardStats, LocationBreakdown } from './components/Dashboard';
 
 // Initial Column Definitions
@@ -74,7 +75,7 @@ const App: React.FC = () => {
   const [progressText, setProgressText] = useState('');
 
   // UI State
-  const [activeTab, setActiveTab] = useState<'table' | 'dashboard'>('table');
+  const [activeTab, setActiveTab] = useState<'table' | 'dashboard' | 'enderecos'>('table');
 
   // Visibility toggles — when unchecked the data is treated as empty for display/dashboard
   const [showSds, setShowSds] = useState(true);
@@ -430,16 +431,19 @@ const App: React.FC = () => {
 
       const controller = new AbortController();
       cepAbortRef.current = controller;
-      setCepValidationProgress({ done: 0, total: allCeps.length });
-      setProgressText(`Validando CEPs via ViaCEP (0 / ${allCeps.length})...`);
+      const uniqueCepCount = new Set(allCeps.map(c => c.replace(/\D/g, ''))).size;
+      setCepValidationProgress({ done: 0, total: uniqueCepCount });
+      setProgressText(`Validando CEPs (0 / ${uniqueCepCount})...`);
       setIsProcessing(true);
 
+      const t0 = performance.now();
       try {
         const results = await bulkLookupCeps(
           allCeps,
           (done, total) => {
             setCepValidationProgress({ done, total });
-            setProgressText(`Validando CEPs via ViaCEP (${done} / ${total})...`);
+            const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+            setProgressText(`Validando CEPs (${done} / ${total}) — ${elapsed}s`);
           },
           controller.signal
         );
@@ -450,17 +454,61 @@ const App: React.FC = () => {
           (next as Map<string, CorporateInfo>).forEach((info, key) => {
             const hit = results.get(info.cep);
             if (hit === undefined) return; // CEP had no digits or wasn't queried
+
+            let cepCorrection;
+            let mergedLogradouro = info.logradouro;
+
+            if (hit) {
+              if (hit.logradouro) {
+                mergedLogradouro = hit.logradouro;
+                // Preserve the number if it exists after a comma in the original
+                const commaIndex = info.logradouro.indexOf(',');
+                if (commaIndex !== -1) {
+                  mergedLogradouro += info.logradouro.substring(commaIndex);
+                } else {
+                  // Fallback: If original has a number separated by space at the end, attempt to preserve.
+                  const spaceMatch = info.logradouro.match(/\s(\d+|SN)$/i);
+                  if (spaceMatch) {
+                    mergedLogradouro += spaceMatch[0];
+                  }
+                }
+              }
+
+              const buildStr = (l: string, c: string, b: string, cty: string, u: string) =>
+                [l, c, b, cty, u].filter(Boolean).join(' - ');
+                
+              const originalStr = buildStr(info.logradouro, info.complemento, info.bairro, info.cidade, info.uf);
+              const newStr = buildStr(
+                mergedLogradouro,
+                hit.complemento || info.complemento,
+                hit.bairro || info.bairro,
+                hit.localidade || info.cidade,
+                hit.uf || info.uf
+              );
+              
+              const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+              if (norm(originalStr) !== norm(newStr)) {
+                cepCorrection = {
+                  serial: info.serial,
+                  cep: info.cep,
+                  original: originalStr,
+                  corrected: newStr,
+                };
+              }
+            }
+
             const updated: CorporateInfo = {
               ...info,
               cepStatus: hit ? 'valid' : 'invalid',
               // Overwrite address fields only if ViaCEP returned data
               ...(hit ? {
-                logradouro: hit.logradouro || info.logradouro,
+                logradouro: mergedLogradouro,
                 complemento: hit.complemento || info.complemento,
                 bairro: hit.bairro || info.bairro,
                 cidade: hit.localidade || info.cidade,
                 uf: hit.uf || info.uf,
               } : {}),
+              ...(cepCorrection ? { cepCorrection } : {}),
             };
             next.set(key, updated);
           });
@@ -532,21 +580,69 @@ const App: React.FC = () => {
   };
 
   const handleDedupe = () => {
-      if (!window.confirm("Remover duplicados baseados na OS?")) return;
-      const seen = new Set();
-      const unique: ReportItem[] = [];
-      allData.forEach(item => {
-          let key = String(item.os).trim();
-          if (!key || key === '-' || key === 'N/A') {
-               key = `NO_OS|${item.serie}|${item.dataCriacao}|${item.tipo}`;
-          }
-          if (!seen.has(key)) {
-              seen.add(key);
-              unique.push(item);
-          }
-      });
-      alert(`Removidos ${allData.length - unique.length} duplicados.`);
-      setAllData(unique);
+    // Build a stable, normalized deduplication key for each report item.
+    // Priority:
+    //   1. OS number (normalized: whitespace removed, leading zeros stripped)
+    //   2. Serial + raw creation date (ISO) + type  →  catches OSes absent in some reports
+    //   3. Unique per-row ID                         →  prevents false dedup of unknown records
+    const makeKey = (item: ReportItem): string => {
+      const os = String(item.os || '').replace(/\s+/g, '').replace(/^0+/, '').toUpperCase();
+      const isBlank = (v: string) => !v || v === '-' || v.toUpperCase() === 'N/A';
+
+      if (!isBlank(os)) return `OS|${os}`;
+
+      const serie = String(item.serie || '').replace(/\s+/g, '').toUpperCase();
+      // Use the raw Date timestamp (ISO date-only) for consistency across files;
+      // fall back to the already-formatted string only when raw is unavailable.
+      const dateKey = item._rawCriacao
+        ? item._rawCriacao.toISOString().slice(0, 10)
+        : String(item.dataCriacao || '').trim();
+      const tipo = String(item.tipo || '').trim();
+
+      if (!isBlank(serie)) return `SER|${serie}|${dateKey}|${tipo}`;
+
+      // Neither OS nor serial: treat as unique to avoid collapsing unrelated records
+      return `UNK|${item.id}`;
+    };
+
+    // Count non-empty fields as a proxy for record completeness
+    const countFilled = (item: ReportItem): number => {
+      const fields = ['os', 'serie', 'tipo', 'statusOs', 'contrato', 'situacaoEquip',
+                      'equipProduzindo', 'tipoConexao', 'ip', 'hostname', 'bairro', 'cidade', 'filial'];
+      return fields.filter(f => { const v = String(item[f] || '').trim(); return v && v !== '-'; }).length;
+    };
+
+    // Group all items by their dedup key
+    const groups = new Map<string, ReportItem[]>();
+    allData.forEach(item => {
+      const key = makeKey(item);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(item);
+    });
+
+    // From each group keep the most complete record (most non-'-' fields filled)
+    const unique: ReportItem[] = Array.from(groups.values()).map(group =>
+      group.reduce((best, item) => countFilled(item) > countFilled(best) ? item : best)
+    );
+
+    const removed = allData.length - unique.length;
+
+    if (removed === 0) {
+      alert('Nenhum duplicado encontrado nos relatórios carregados.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Análise concluída:\n\n` +
+      `  • Total carregado: ${allData.length.toLocaleString('pt-BR')} registros\n` +
+      `  • Únicos encontrados: ${unique.length.toLocaleString('pt-BR')} registros\n` +
+      `  • Duplicados a remover: ${removed.toLocaleString('pt-BR')}\n\n` +
+      `Em grupos com duplicatas, será mantido o registro mais completo.\n\n` +
+      `Deseja prosseguir?`
+    );
+    if (!confirmed) return;
+
+    setAllData(unique);
   };
 
   // --- Filtering Logic ---
@@ -793,6 +889,7 @@ const App: React.FC = () => {
           billing: { active: 0, noRecent: 0, never: 0 },
           situacao: [],
           serials: [],
+          serialDetails: {},
         });
       }
       return map.get(name)!;
@@ -875,7 +972,10 @@ const App: React.FC = () => {
       // --- Accumulate location breakdowns ---
       const applyToLoc = (loc: LocationBreakdown, sitMap: Map<string, Record<string, number>>, locName: string) => {
         loc.total++;
-        if (item.serie && item.serie !== '-') loc.serials.push(item.serie);
+        if (item.serie && item.serie !== '-') {
+          loc.serials.push(item.serie);
+          loc.serialDetails[item.serie] = { sdsStatus, nddStatus, billingStatus: itemBilling };
+        }
 
         if (sdsLoaded)  loc.sds[sdsStatus]++;
         else            loc.sds.noData++;
@@ -941,6 +1041,7 @@ const App: React.FC = () => {
         const allCorp = Array.from(corporateData.values() as Iterable<CorporateInfo>);
         let valid = 0, invalid = 0, unchecked = 0;
         const invalidList: CepInvalidEntry[] = [];
+        const correctedList: CepCorrectionEntry[] = [];
         allCorp.forEach(c => {
           if (!c.cep || c.cep.length !== 8) { unchecked++; return; }
           if (c.cepStatus === 'valid')   { valid++; }
@@ -949,8 +1050,12 @@ const App: React.FC = () => {
             invalidList.push({ serial: c.serial, cep: c.cep, enderecoRaw: c.enderecoInstalacao, cidade: c.cidade, uf: c.uf, modelo: c.modelo });
           }
           else { unchecked++; }
+
+          if (c.cepCorrection) {
+            correctedList.push(c.cepCorrection);
+          }
         });
-        return { total: valid + invalid, valid, invalid, unchecked, invalidList };
+        return { total: valid + invalid, valid, invalid, unchecked, invalidList, correctedList };
       })() : null,
     };
   }, [filteredData, sdsData, nddData, corporateData, showCorp, filters.alertDays, filters.offlineDays]);
@@ -1363,6 +1468,12 @@ const App: React.FC = () => {
                    className="w-3 h-3 rounded border-gray-400 text-amber-600 focus:ring-amber-400 focus:ring-1 cursor-pointer" />
                  <span className="text-[9px] text-amber-700">Validar CEPs via ViaCEP</span>
                </label>
+                <button
+                  type="button"
+                  onClick={async () => { await clearCepCache(); alert('Cache de CEPs limpo!'); }}
+                  className="text-[8px] text-red-500 hover:text-red-700 underline cursor-pointer"
+                  title="Remove todos os CEPs do cache local."
+                >Limpar Cache</button>
                {cepValidationProgress && (
                  <span className="text-[9px] text-amber-600 font-semibold animate-pulse">
                    {cepValidationProgress.done}/{cepValidationProgress.total} CEPs…
@@ -1460,6 +1571,15 @@ const App: React.FC = () => {
               : null,
             icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/></svg>,
           },
+          {
+            id: 'enderecos' as const,
+            label: 'Endereços',
+            activeColor: 'border-emerald-600 text-emerald-600',
+            badge: dashboardStats.cepStats?.total
+              ? <span className={`ml-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full ${activeTab === 'enderecos' ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'}`}>{dashboardStats.cepStats.total.toLocaleString('pt-BR')}</span>
+              : null,
+            icon: <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/></svg>,
+          },
         ]).map(tab => (
           <button
             key={tab.id}
@@ -1536,6 +1656,7 @@ const App: React.FC = () => {
         </>
       )}
       {activeTab === 'dashboard' && <Dashboard stats={dashboardStats} />}
+      {activeTab === 'enderecos' && <EnderecosTab cepStats={dashboardStats.cepStats} />}
 
       {/* Column Config Modal */}
       <Modal 

@@ -223,7 +223,11 @@ export const readRawExcel = async (file: File, headerRowsToSkip = 1): Promise<an
       try {
         const data = e.target?.result;
         let workbook: XLSX.WorkBook;
-        if (file.name.toLowerCase().match(/\.(xlsx|xlsb|xls)$/)) {
+        if (file.name.toLowerCase().endsWith('.xls')) {
+          // Legacy BIFF8 .xls — ANSI/Windows-1252. Must use type:'array' (ArrayBuffer)
+          // + explicit codepage:1252. CPExcel is loaded via set_cptable() at module init.
+          workbook = XLSX.read(data as ArrayBuffer, { type: 'array', cellDates: true, codepage: 1252 } as any);
+        } else if (file.name.toLowerCase().match(/\.(xlsx|xlsb)$/)) {
           workbook = XLSX.read(data as ArrayBuffer, { type: 'array', cellDates: true });
         } else {
           // CSV — read as text

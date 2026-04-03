@@ -22,3 +22,15 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claude internal
+.claude/
+migrated_prompt_history/
+
+# Sample / debug files
+*.xlsx
+*.xls
+*.csv
+check-bug.cjs
+painelpro.md
+*.html

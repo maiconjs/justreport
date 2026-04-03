@@ -70,6 +70,15 @@ export function splitBairroCidade(bc: string): { bairro: string; cidade: string 
   // Take the LAST candidate that leaves a meaningful bairro (at least 2 chars)
   for (let k = candidates.length - 1; k >= 0; k--) {
     const idx = candidates[k];
+
+    // Skip if the character before the split is a single lowercase letter preceded
+    // by a space — it's a Portuguese preposition/article (d', e, a, o) that belongs
+    // to the city name, not a bairro→cidade boundary.
+    // Example: "Dias dÁvila" — the d→Á transition is INSIDE the city name.
+    if (idx >= 2 && isLower(bc[idx - 1]) && bc[idx - 2] === ' ') {
+      continue;
+    }
+
     const bairro = bc.slice(0, idx).trim();
     const cidade = bc.slice(idx).trim();
     if (bairro.length >= 2 && cidade.length >= 2 && isAlpha(cidade[0])) {
@@ -103,15 +112,32 @@ export function parseEnderecoInstalacao(raw: string): ParsedAddress {
   if (!/^[A-Z]{2}$/.test(uf)) return empty;
 
   // Third-to-last: BairroCidade concatenated
-  const bairroCidade = parts[parts.length - 3].trim();
+  let bairroCidade = parts[parts.length - 3].trim();
 
   // Everything before BairroCidade
   const streetParts = parts.slice(0, parts.length - 3);
 
-  const { bairro, cidade } = splitBairroCidade(bairroCidade);
+  // Handle "*****CidadeName" pattern — asterisks indicate unknown/empty bairro.
+  // Strip leading asterisks; whatever remains is the cidade (no bairro).
+  let bairro = '';
+  let cidade = '';
+
+  const starPrefix = /^\*{2,}/.exec(bairroCidade);
+  if (starPrefix) {
+    // Remove the asterisk prefix — rest is the cidade
+    cidade = bairroCidade.slice(starPrefix[0].length).trim();
+    bairro = '';
+  } else {
+    const split = splitBairroCidade(bairroCidade);
+    bairro = split.bairro;
+    cidade = split.cidade;
+  }
 
   const logradouro = (streetParts[0] ?? '').trim();
-  const complemento = streetParts.slice(1).join(' - ').trim();
+  // Filter out complement parts that are only asterisks (e.g. "*****")
+  const complemento = streetParts.slice(1)
+    .filter(p => !/^\*+$/.test(p.trim()))
+    .join(' - ').trim();
 
   return { logradouro, complemento, bairro, cidade, uf, cep };
 }
