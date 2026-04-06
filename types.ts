@@ -99,13 +99,7 @@ export interface FilterState {
   endConclusion: string;
   alertDays: number;
   offlineDays: number;
-  selectedTypes: string[];
-  selectedProds: string[];
-  selectedStatus: string[];
-  selectedSituacao: string[];
-  selectedConexao: string[];
-  selectedMon: string[];
-  selectedNddMon: string[];
+  columnFilters: Record<string, string[]>;
 }
 
 export interface MapColumnConfig {

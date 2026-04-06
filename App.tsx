@@ -147,13 +147,7 @@ const App: React.FC = () => {
     endConclusion: '',
     alertDays: 7,
     offlineDays: 30,
-    selectedTypes: [],
-    selectedProds: [],
-    selectedStatus: [],
-    selectedSituacao: [],
-    selectedConexao: [],
-    selectedMon: [],
-    selectedNddMon: []
+    columnFilters: {}
   });
 
   // Debounce the filters to avoid heavy calculation on every keystroke
@@ -857,62 +851,89 @@ const App: React.FC = () => {
     setAllData(unique);
   };
 
-  // --- Filtering Logic ---
+  const visibleColumns = useMemo(() => columns.filter(c => c.visible), [columns]);
+
+  const getRawCellValue = useCallback((item: ReportItem, col: ColumnDef): string => {
+      const serialKey = String(item.serie).trim().toUpperCase();
+      
+      if (col.type === 'sds') {
+          const sdsRecord = sdsData.get(serialKey);
+          if (!sdsRecord) {
+              if (col.key === 'status') return 'Não Monitorado';
+              return '-';
+          }
+          if (col.key === 'status') {
+              if (!sdsRecord.rawLastUpdate) return 'Dados Incompletos';
+              const diffDays = Math.ceil(Math.abs(new Date().getTime() - sdsRecord.rawLastUpdate.getTime()) / 86400000);
+              if (diffDays > filters.offlineDays) return 'Não Monitorado';
+              if (diffDays > filters.alertDays) return 'Alerta';
+              return 'Monitorado';
+          }
+          if (col.key === 'lastUpdate') return sdsRecord.rawLastUpdate ? sdsRecord.rawLastUpdate.toLocaleDateString('pt-BR') : 'N/A';
+          if (col.key === 'detection') return sdsRecord.rawDetection ? sdsRecord.rawDetection.toLocaleDateString('pt-BR') : 'N/A';
+          if (col.key === 'counterFimTotal') return sdsRecord.counterFimTotal != null ? String(sdsRecord.counterFimTotal) : '-';
+          if (col.key === 'counterUsoTotal') return sdsRecord.counterUsoTotal != null ? String(sdsRecord.counterUsoTotal) : '-';
+          if (col.key === 'counterFimColor') return sdsRecord.counterFimColor != null ? String(sdsRecord.counterFimColor) : '-';
+          if (col.key === 'counterMecanismo') return sdsRecord.counterMecanismo != null ? String(sdsRecord.counterMecanismo) : '-';
+          if (col.key === 'counterUso30') return sdsRecord.counterUso30 != null ? String(sdsRecord.counterUso30) : '-';
+          if (col.key === 'sdsSupplyStatus') return sdsRecord.sdsSupplyStatus || '-';
+          if (col.key === 'sdsModel') return sdsRecord.sdsModel || '-';
+          return '-';
+      }
+      
+      if (col.type === 'ndd') {
+          const nddRecord = nddData.get(serialKey);
+          if (!nddRecord) {
+              if (col.key === 'status') return 'Não Monitorado';
+              return '-';
+          }
+           if (col.key === 'status') {
+              const days = parseInt(nddRecord.daysWithoutMeters) || 0;
+              if (days > filters.offlineDays || nddRecord.status === 'NoMonitoringData') return 'Não Monitorado';
+              if (days > filters.alertDays || nddRecord.status === 'RedEvent') return 'Alerta';
+              return 'Monitorado';
+          }
+          return String((nddRecord as any)[col.key] || '-');
+      }
+
+      if (col.type === 'map') {
+          const mapRecord = mapData.get(serialKey);
+          return mapRecord ? String(mapRecord[col.key] || '-') : '-';
+      }
+
+      if (col.type === 'corporate') {
+          const serialOnlyAlnum = String(item.serie).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          const corpRecord = corporateData.get(serialOnlyAlnum);
+          if (!corpRecord) {
+               return corporateData.size > 0 ? 'Fora do contrato' : '-';
+          }
+          if (col.key === 'status') return corpRecord.status || '-';
+          return String((corpRecord as any)[col.key] || '-');
+      }
+
+      return String(item[col.key] || '-');
+  }, [sdsData, nddData, mapData, corporateData, filters.offlineDays, filters.alertDays]);
 
   const uniqueValues = useMemo(() => {
-      const sets = {
-          tipo: new Set<string>(),
-          prod: new Set<string>(),
-          status: new Set<string>(),
-          situacao: new Set<string>(),
-          conexao: new Set<string>(),
-          mon: new Set<string>(),
-          nddMon: new Set<string>()
-      };
+      const sets: Record<string, Set<string>> = {};
+      visibleColumns.forEach(col => sets[col.id] = new Set<string>());
       
-      const now = new Date();
-
       effectiveData.forEach(item => {
-          if (item.tipo) sets.tipo.add(item.tipo);
-          if (item.equipProduzindo) sets.prod.add(item.equipProduzindo);
-          if (item.statusOs) sets.status.add(item.statusOs);
-          if (item.situacaoEquip) sets.situacao.add(item.situacaoEquip);
-          if (item.tipoConexao) sets.conexao.add(item.tipoConexao);
-          
-          let status = '-';
-          const key = String(item.serie).trim().toUpperCase();
-          const record = sdsData.get(key);
-          if (!record) status = 'Não Monitorado';
-          else if (!record.rawLastUpdate) status = 'Dados Incompletos';
-          else {
-              const diffDays = Math.ceil(Math.abs(now.getTime() - record.rawLastUpdate.getTime()) / (1000 * 60 * 60 * 24));
-              if (diffDays > filters.offlineDays) status = 'Não Monitorado';
-              else if (diffDays > filters.alertDays) status = 'Alerta';
-              else status = 'Monitorado';
-          }
-          sets.mon.add(status);
-
-          let nddStatus = '-';
-          const nddRecord = nddData.get(key);
-          if (!nddRecord) nddStatus = 'Não Monitorado';
-          else {
-              const days = parseInt(nddRecord.daysWithoutMeters) || 0;
-              if (days > filters.offlineDays || nddRecord.status === 'NoMonitoringData') nddStatus = 'Não Monitorado';
-              else if (days > filters.alertDays || nddRecord.status === 'RedEvent') nddStatus = 'Alerta';
-              else nddStatus = 'Monitorado';
-          }
-          sets.nddMon.add(nddStatus);
+          visibleColumns.forEach(col => {
+              const val = getRawCellValue(item, col);
+              if (val !== undefined && val !== null) {
+                  const s = String(val).trim();
+                  if (s !== '') sets[col.id].add(s);
+              }
+          });
       });
-      return {
-          tipo: Array.from(sets.tipo).sort(),
-          prod: Array.from(sets.prod).sort(),
-          status: Array.from(sets.status).sort(),
-          situacao: Array.from(sets.situacao).sort(),
-          conexao: Array.from(sets.conexao).sort(),
-          mon: Array.from(sets.mon).sort(),
-          nddMon: Array.from(sets.nddMon).sort()
-      };
-  }, [effectiveData, sdsData, nddData, filters.alertDays, filters.offlineDays]);
+      
+      const result: Record<string, string[]> = {};
+      Object.keys(sets).forEach(k => {
+          result[k] = Array.from(sets[k]).sort();
+      });
+      return result;
+  }, [effectiveData, visibleColumns, getRawCellValue]);
 
   const filteredData = useMemo(() => {
       let data = [...effectiveData];
@@ -928,7 +949,10 @@ const App: React.FC = () => {
       const term = activeFilters.search.toLowerCase();
       const isGlobal = activeFilters.searchField === 'all';
       
-      const now = new Date();
+      // Setup dynamic column filters
+      const colsWithFilters = visibleColumns.filter(c => 
+          activeFilters.columnFilters[c.id] && activeFilters.columnFilters[c.id].length > 0
+      );
 
       data = data.filter(item => {
           if (startC || endC) {
@@ -946,43 +970,12 @@ const App: React.FC = () => {
              } else if (startF || endF) return false;
           }
 
-          if (activeFilters.selectedTypes.length && !activeFilters.selectedTypes.includes(item.tipo)) return false;
-          if (activeFilters.selectedProds.length && !activeFilters.selectedProds.includes(item.equipProduzindo)) return false;
-          if (activeFilters.selectedStatus.length && !activeFilters.selectedStatus.includes(item.statusOs)) return false;
-          if (activeFilters.selectedSituacao.length && !activeFilters.selectedSituacao.includes(item.situacaoEquip)) return false;
-          if (activeFilters.selectedConexao.length && !activeFilters.selectedConexao.includes(item.tipoConexao)) return false;
-          
-          if (activeFilters.selectedMon.length) {
-              const key = String(item.serie).trim().toUpperCase();
-              const record = sdsData.get(key);
-              let status = 'Não Monitorado';
-              
-              if (!record) status = 'Não Monitorado';
-              else if (!record.rawLastUpdate) status = 'Dados Incompletos';
-              else {
-                  const diffDays = Math.ceil(Math.abs(now.getTime() - record.rawLastUpdate.getTime()) / (1000 * 60 * 60 * 24));
-                  if (diffDays > activeFilters.offlineDays) status = 'Não Monitorado';
-                  else if (diffDays > activeFilters.alertDays) status = 'Alerta';
-                  else status = 'Monitorado';
+          // Check dynamic column filters
+          for (const col of colsWithFilters) {
+              const cellValue = String(getRawCellValue(item, col)).trim();
+              if (!activeFilters.columnFilters[col.id].includes(cellValue)) {
+                  return false;
               }
-              
-              if (!activeFilters.selectedMon.includes(status)) return false;
-          }
-
-          if (activeFilters.selectedNddMon.length) {
-              const key = String(item.serie).trim().toUpperCase();
-              const nddRecord = nddData.get(key);
-              let nddStatus = 'Não Monitorado';
-              
-              if (!nddRecord) nddStatus = 'Não Monitorado';
-              else {
-                  const days = parseInt(nddRecord.daysWithoutMeters) || 0;
-                  if (days > activeFilters.offlineDays || nddRecord.status === 'NoMonitoringData') nddStatus = 'Não Monitorado';
-                  else if (days > activeFilters.alertDays || nddRecord.status === 'RedEvent') nddStatus = 'Alerta';
-                  else nddStatus = 'Monitorado';
-              }
-              
-              if (!activeFilters.selectedNddMon.includes(nddStatus)) return false;
           }
 
           if (hasSearch) {
@@ -1039,7 +1032,7 @@ const App: React.FC = () => {
       });
 
       return data;
-  }, [effectiveData, debouncedFilters, sdsData, nddData, mapData]);
+  }, [effectiveData, debouncedFilters, visibleColumns, sdsData, nddData, mapData, getRawCellValue]);
 
   useEffect(() => setCurrentPage(1), [filteredData.length]);
 
@@ -1318,8 +1311,6 @@ const App: React.FC = () => {
       setColumns(columns.map(c => c.id === id ? { ...c, visible: !c.visible } : c));
   };
 
-  const visibleColumns = useMemo(() => columns.filter(c => c.visible), [columns]);
-
   // --- Export ---
   
   const handleExportClick = (type: 'csv' | 'xlsx' | 'pdf') => {
@@ -1452,35 +1443,79 @@ const App: React.FC = () => {
 
   // --- Components ---
   
-  const FilterDropdown = ({ title, options, selected, onChange, color = 'gray' }: any) => {
+  const FilterDropdown = ({ title, options, selected, onChange, color = 'gray' }: { title?: string, options: string[], selected: string[], onChange: (v: string[]) => void, color?: string }) => {
       const [open, setOpen] = useState(false);
+      const [search, setSearch] = useState('');
+      
+      const filteredOptions = useMemo(() => {
+          if (!search) return options;
+          const s = search.toLowerCase();
+          return options.filter(o => o.toLowerCase().includes(s));
+      }, [options, search]);
+
+      const handleSelectAll = () => {
+          if (search) {
+              const newSelection = new Set([...selected, ...filteredOptions]);
+              onChange(Array.from(newSelection));
+          } else {
+              onChange(options);
+          }
+      };
+
+      const handleClear = () => {
+          if (search) {
+              const currentSet = new Set(selected);
+              filteredOptions.forEach(o => currentSet.delete(o));
+              onChange(Array.from(currentSet));
+          } else {
+              onChange([]);
+          }
+      };
+
       return (
-          <div className="relative inline-block ml-1">
+          <div className="relative inline-flex items-center ml-1">
               <button 
-                 onClick={() => setOpen(!open)}
+                 onClick={() => { setOpen(!open); setSearch(''); }}
                  className={`p-0.5 rounded hover:bg-${color}-200 transition-colors ${selected.length ? 'text-blue-600 bg-blue-50' : 'text-gray-400'}`}
+                 title="Filtrar"
               >
-                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"/></svg>
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
               </button>
               {open && (
                   <>
                   <div className="fixed inset-0 z-30" onClick={() => setOpen(false)}></div>
-                  <div className="absolute z-40 mt-1 w-48 bg-white border border-gray-200 shadow-lg rounded p-2 max-h-60 overflow-y-auto left-0">
-                      {options.length === 0 && <div className="text-xs text-gray-400 italic">Vazio</div>}
-                      {options.map((opt: string) => (
-                          <label key={opt} className="flex items-center gap-2 p-1 hover:bg-gray-50 cursor-pointer">
-                              <input 
-                                  type="checkbox" 
-                                  checked={selected.includes(opt)}
-                                  onChange={(e) => {
-                                      if(e.target.checked) onChange([...selected, opt]);
-                                      else onChange(selected.filter((s: string) => s !== opt));
-                                  }}
-                                  className="rounded border-gray-300 text-blue-600 h-3 w-3"
-                              />
-                              <span className="text-xs text-gray-700 truncate" title={opt}>{opt}</span>
-                          </label>
-                      ))}
+                  <div className="absolute z-40 mt-1 w-52 bg-white border border-gray-200 shadow-xl rounded p-2 max-h-80 flex flex-col top-full left-1/2" style={{ transform: 'translateX(-50%)' }}>
+                      <div className="mb-2">
+                          <input 
+                              type="text"
+                              autoFocus
+                              placeholder="Pesquisar..."
+                              value={search}
+                              onChange={(e) => setSearch(e.target.value)}
+                              className="w-full text-xs font-normal text-gray-800 p-1.5 border rounded outline-none focus:border-blue-500"
+                          />
+                      </div>
+                      <div className="flex gap-2 mb-2 pb-2 border-b border-gray-100 px-1">
+                          <button onClick={handleSelectAll} className="text-[10px] text-blue-600 hover:underline">Selecionar tudo</button>
+                          <button onClick={handleClear} className="text-[10px] text-gray-500 hover:underline ml-auto">Limpar</button>
+                      </div>
+                      <div className="overflow-y-auto flex-grow custom-scrollbar">
+                          {filteredOptions.length === 0 && <div className="text-[10px] text-gray-400 italic text-center py-2">Nenhum resultado</div>}
+                          {filteredOptions.map((opt: string) => (
+                              <label key={opt} className="flex items-start gap-2 p-1 hover:bg-gray-50 cursor-pointer">
+                                  <input 
+                                      type="checkbox" 
+                                      checked={selected.includes(opt)}
+                                      onChange={(e) => {
+                                          if(e.target.checked) onChange([...selected, opt]);
+                                          else onChange(selected.filter((s: string) => s !== opt));
+                                      }}
+                                      className="rounded border-gray-300 text-blue-600 h-3 w-3 mt-0.5 flex-shrink-0"
+                                  />
+                                  <span className="text-xs text-gray-700 break-words" title={opt}>{opt}</span>
+                              </label>
+                          ))}
+                      </div>
                   </div>
                   </>
               )}
@@ -1489,57 +1524,57 @@ const App: React.FC = () => {
   };
 
   const renderHeaderCell = useCallback((col: ColumnDef, index: number) => {
-      let content = <span>{col.label}</span>;
       let bgColor = 'bg-gray-50';
       let textColor = 'text-gray-600';
-      let borderColor = 'border-gray-200';
-
-      const addFilter = (options: string[], selected: string[], onChange: (v: string[]) => void, color?: string) => (
-          <div className="flex items-center justify-between gap-1">
-              <span>{col.label}</span>
-              <FilterDropdown options={options} selected={selected} onChange={onChange} color={color} />
-          </div>
-      );
+      let borderColor = 'border-b border-gray-200';
+      let dropdownColor = 'gray';
 
       if (col.type === 'sds') {
           bgColor = 'bg-blue-50/80';
           textColor = 'text-gray-800';
-          if (col.key === 'status') {
-              content = addFilter(uniqueValues.mon, filters.selectedMon, (v) => setFilters(prev => ({...prev, selectedMon: v})), 'blue');
-          }
+          dropdownColor = 'blue';
       } else if (col.type === 'ndd') {
           bgColor = 'bg-green-50/80';
           textColor = 'text-gray-800';
-          if (col.key === 'status') {
-              content = addFilter(uniqueValues.nddMon, filters.selectedNddMon, (v) => setFilters(prev => ({...prev, selectedNddMon: v})), 'green');
-          }
+          dropdownColor = 'green';
       } else if (col.type === 'map') {
           bgColor = 'bg-purple-50/80';
-          borderColor = 'border-purple-100';
+          borderColor = 'border-b border-purple-100';
           textColor = 'text-purple-900';
+          dropdownColor = 'purple';
       } else if (col.type === 'corporate') {
           bgColor = 'bg-amber-50/80';
-          borderColor = 'border-amber-100';
+          borderColor = 'border-b border-amber-100';
           textColor = 'text-amber-900';
-      } else {
-          if (col.key === 'tipo') content = addFilter(uniqueValues.tipo, filters.selectedTypes, v => setFilters(prev => ({...prev, selectedTypes: v})));
-          else if (col.key === 'statusOs') content = addFilter(uniqueValues.status, filters.selectedStatus, v => setFilters(prev => ({...prev, selectedStatus: v})));
-          else if (col.key === 'situacaoEquip') content = addFilter(uniqueValues.situacao, filters.selectedSituacao, v => setFilters(prev => ({...prev, selectedSituacao: v})));
-          else if (col.key === 'equipProduzindo') content = addFilter(uniqueValues.prod, filters.selectedProds, v => setFilters(prev => ({...prev, selectedProds: v})));
-          else if (col.key === 'tipoConexao') content = addFilter(uniqueValues.conexao, filters.selectedConexao, v => setFilters(prev => ({...prev, selectedConexao: v})));
+          dropdownColor = 'amber';
       }
+
+      const options = uniqueValues[col.id] || [];
+      const selected = filters.columnFilters[col.id] || [];
+      const onChange = (v: string[]) => setFilters(prev => ({
+          ...prev, 
+          columnFilters: { ...prev.columnFilters, [col.id]: v }
+      }));
 
       const stickyClass = index === 0 ? 'sticky left-0 z-20 shadow-[2px_0_5px_-2px_rgba(0,0,0,0.1)]' : '';
 
       return (
           <th 
             key={col.id} 
-            className={`px-3 py-2 text-left font-bold border-b whitespace-nowrap ${bgColor} ${textColor} ${borderColor} ${stickyClass}`}
+            className={`px-3 py-2 text-left font-bold ${borderColor} whitespace-nowrap ${bgColor} ${textColor} ${stickyClass}`}
           >
-              {content}
+              <div className="flex items-center justify-between gap-1">
+                  <span>{col.label}</span>
+                  <FilterDropdown 
+                      options={options} 
+                      selected={selected} 
+                      onChange={onChange} 
+                      color={dropdownColor} 
+                  />
+              </div>
           </th>
       );
-  }, [uniqueValues, filters]);
+  }, [uniqueValues, filters.columnFilters]);
 
   const renderRowCell = useCallback((row: ReportItem, col: ColumnDef, index: number) => {
       const cacheKey = String(row.serie).trim().toUpperCase();
