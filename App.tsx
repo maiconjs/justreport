@@ -15,9 +15,19 @@ import { Dashboard, DashboardStats, LocationBreakdown } from './components/Dashb
 // Initial Column Definitions
 const INITIAL_COLUMNS: ColumnDef[] = [
   // SDS — hidden until SDS base is loaded
-  { id: 'mon', label: 'Monitoramento', visible: false, type: 'sds', key: 'status' },
-  { id: 'lastUpdate', label: 'Ult. Atualização', visible: false, type: 'sds', key: 'lastUpdate' },
-  { id: 'detection', label: 'Data Detecção', visible: false, type: 'sds', key: 'detection' },
+  { id: 'mon',         label: 'Monitoramento',    visible: false, type: 'sds', key: 'status'       },
+  { id: 'lastUpdate',  label: 'Ult. Atualização', visible: false, type: 'sds', key: 'lastUpdate'   },
+  { id: 'detection',   label: 'Data Detecção',    visible: false, type: 'sds', key: 'detection'    },
+  // Usage-report counter columns — hidden until usage_report.xlsx is loaded
+  { id: 'counterTotal',  label: 'Contador A4',      visible: false, type: 'sds', key: 'counterFimTotal'  },
+  { id: 'counterUso',    label: 'Uso Acumulado',     visible: false, type: 'sds', key: 'counterUsoTotal'  },
+  { id: 'counterColor',  label: 'Contador Coloridas',visible: false, type: 'sds', key: 'counterFimColor'  },
+  // SDS CAV counter columns — hidden until SDS CAV.xlsx is loaded
+  { id: 'counterMecan',  label: 'Ciclos Mecanismo',  visible: false, type: 'sds', key: 'counterMecanismo' },
+  { id: 'counterUso30',  label: 'Uso 30 dias',       visible: false, type: 'sds', key: 'counterUso30'     },
+  { id: 'sdsSupply',     label: 'Suprimentos SDS',   visible: false, type: 'sds', key: 'sdsSupplyStatus'  },
+  // Shared
+  { id: 'sdsModel',      label: 'Modelo (SDS)',       visible: false, type: 'sds', key: 'sdsModel'         },
   // NDD MPS — hidden until NDD base is loaded
   { id: 'nddMon', label: 'Monitoramento MPS', visible: false, type: 'ndd', key: 'status' },
   { id: 'nddLastUpdate', label: 'Ult. Leitura MPS', visible: false, type: 'ndd', key: 'lastUpdate' },
@@ -62,8 +72,32 @@ const INITIAL_COLUMNS: ColumnDef[] = [
 const App: React.FC = () => {
   // State
   const [allData, setAllData] = useState<ReportItem[]>([]);
-  const [sdsData, setSdsData] = useState<Map<string, { rawLastUpdate: Date | null, rawDetection: Date | null }>>(new Map());
-  const [nddData, setNddData] = useState<Map<string, { status: string, lastUpdate: string, daysWithoutMeters: string, rawLastUpdate: Date | null, accountingStatus: string, connectionType: string, mpsIp: string }>>(new Map());
+  const [sdsData, setSdsData] = useState<Map<string, {
+    rawLastUpdate: Date | null;
+    rawDetection:  Date | null;
+    // usage_report
+    isUsageReport?:  boolean;
+    counterFimTotal?: number;
+    counterFimColor?: number;
+    counterFimMono?:  number;
+    counterUsoTotal?: number;
+    counterUsoColor?: number;
+    counterUsoMono?:  number;
+    readingPeriods?:  import('./types').SdsReadingPeriod[];
+    // SDS CAV
+    isSdsCav?:         boolean;
+    counterMecanismo?: number;
+    counterUso30?:     number;
+    sdsMonitorStatus?: string;
+    sdsSupplyStatus?:  string;
+    // shared
+    sdsModel?:        string;
+    sdsManufacturer?: string;
+    sdsZone?:         string;
+    sdsIp?:           string;
+    readingCount?:    number;
+  }>>(new Map());
+  const [nddData, setNddData] = useState<Map<string, { status: string, lastUpdate: string, daysWithoutMeters: string, rawLastUpdate: Date | null, accountingStatus: string, connectionType: string, mpsIp: string, site?: string, department?: string }>>(new Map());
   const [mapData, setMapData] = useState<Map<string, MapInfo>>(new Map());
   const [corporateData, setCorporateData] = useState<Map<string, CorporateInfo>>(new Map());
   const [useCepValidation, setUseCepValidation] = useState(true);
@@ -149,7 +183,22 @@ const App: React.FC = () => {
   useEffect(() => {
     if (sdsData.size > 0 && !sdsColumnsRevealed.current) {
       sdsColumnsRevealed.current = true;
-      setColumns(prev => prev.map(c => c.type === 'sds' ? { ...c, visible: true } : c));
+      const firstRecord = sdsData.values().next().value;
+      const isUsage = firstRecord?.isUsageReport === true;
+      const isCav   = firstRecord?.isSdsCav === true;
+      setColumns(prev => prev.map(c => {
+        if (c.type !== 'sds') return c;
+        // usage_report-only columns
+        const usageCols = ['counterTotal', 'counterUso', 'counterColor'];
+        // CAV-only columns
+        const cavCols   = ['counterMecan', 'counterUso30', 'sdsSupply'];
+        // Shared optional column (model) — show for both usage_report and CAV
+        if (c.id === 'sdsModel') return { ...c, visible: isUsage || isCav };
+        if (usageCols.includes(c.id)) return { ...c, visible: isUsage };
+        if (cavCols.includes(c.id))   return { ...c, visible: isCav };
+        // Base SDS columns always shown
+        return { ...c, visible: true };
+      }));
     }
   }, [sdsData.size]);
 
@@ -200,29 +249,53 @@ const App: React.FC = () => {
   // --- Helpers (Memoized to avoid recreation) ---
 
   const getSdsInfo = useCallback((serial: string): SdsInfo => {
-    const empty = { status: '-', colorClass: '', lastUpdate: '-', detection: '-', rawLastUpdate: null, rawDetection: null } as SdsInfo;
+    const empty: SdsInfo = { status: '-', colorClass: '', lastUpdate: '-', detection: '-', rawLastUpdate: null, rawDetection: null };
     if (!showSds || sdsData.size === 0 || !serial || serial === '-') return empty;
-    
+
     const key = String(serial).trim().toUpperCase();
     const record = sdsData.get(key);
-    
+
     if (!record) {
       return { ...empty, status: 'Não Monitorado', colorClass: 'bg-red-100 text-red-800 font-semibold' };
     }
 
+    // Carry counter / usage-report / CAV fields into the returned SdsInfo
+    const extra: Partial<SdsInfo> = record.isUsageReport ? {
+      isUsageReport:    true,
+      counterFimTotal:  record.counterFimTotal,
+      counterFimColor:  record.counterFimColor,
+      counterFimMono:   record.counterFimMono,
+      counterUsoTotal:  record.counterUsoTotal,
+      counterUsoColor:  record.counterUsoColor,
+      counterUsoMono:   record.counterUsoMono,
+      sdsModel:         record.sdsModel,
+      sdsManufacturer:  record.sdsManufacturer,
+      readingCount:     record.readingCount,
+      readingPeriods:   record.readingPeriods,
+    } : record.isSdsCav ? {
+      isSdsCav:         true,
+      counterMecanismo: record.counterMecanismo,
+      counterUso30:     record.counterUso30,
+      sdsMonitorStatus: record.sdsMonitorStatus,
+      sdsSupplyStatus:  record.sdsSupplyStatus,
+      sdsModel:         record.sdsModel,
+      sdsManufacturer:  record.sdsManufacturer,
+    } : {};
+
     const { rawLastUpdate, rawDetection } = record;
     const lastUpdate = rawLastUpdate ? rawLastUpdate.toLocaleDateString('pt-BR') : 'N/A';
-    const detection = rawDetection ? rawDetection.toLocaleDateString('pt-BR') : 'N/A';
+    const detection  = rawDetection  ? rawDetection.toLocaleDateString('pt-BR')  : 'N/A';
 
-    if (!rawLastUpdate) return { status: 'Dados Incompletos', colorClass: 'bg-yellow-100 text-yellow-800', lastUpdate, detection, rawLastUpdate, rawDetection };
+    if (!rawLastUpdate) {
+      return { ...empty, ...extra, status: 'Dados Incompletos', colorClass: 'bg-yellow-100 text-yellow-800', lastUpdate, detection, rawLastUpdate, rawDetection };
+    }
 
     const now = new Date();
-    const diffDays = Math.ceil(Math.abs(now.getTime() - rawLastUpdate.getTime()) / (1000 * 60 * 60 * 24));
+    const diffDays = Math.ceil(Math.abs(now.getTime() - rawLastUpdate.getTime()) / 86400000);
 
-    if (diffDays > filters.offlineDays) return { status: 'Não Monitorado', colorClass: 'bg-red-100 text-red-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
-    if (diffDays > filters.alertDays) return { status: 'Alerta', colorClass: 'bg-yellow-100 text-yellow-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
-    
-    return { status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
+    if (diffDays > filters.offlineDays) return { ...extra, status: 'Não Monitorado', colorClass: 'bg-red-100 text-red-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
+    if (diffDays > filters.alertDays)   return { ...extra, status: 'Alerta',         colorClass: 'bg-yellow-100 text-yellow-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
+    return { ...extra, status: 'Monitorado', colorClass: 'bg-green-100 text-green-800 font-semibold', lastUpdate, detection, rawLastUpdate, rawDetection };
   }, [sdsData, showSds, filters.offlineDays, filters.alertDays]);
 
   const getNddInfo = useCallback((serial: string): NddInfo => {
@@ -301,41 +374,166 @@ const App: React.FC = () => {
     if (!e.target.files || !e.target.files[0]) return;
     setIsProcessing(true);
     setProgressText("Lendo base SDS...");
-    
+
     try {
-        const raw = await readExcelFile(e.target.files[0]);
-        const newSdsData = new Map();
-        
+      const raw = await readExcelFile(e.target.files[0]);
+      if (!raw.length) { alert("Arquivo SDS vazio."); return; }
+
+      // ── Robust multi-strategy field lookup ──────────────────────────────
+      // Tries: exact → case-insensitive → accent-normalized → partial-contains
+      const norm = (s: string) =>
+        s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim();
+
+      const findVal = (row: any, keys: string[]): any => {
+        const rowKeys = Object.keys(row);
+        for (const k of keys) {
+          // 1. Exact
+          if (row[k] != null && row[k] !== '') return row[k];
+          // 2. Case-insensitive
+          const ci = rowKeys.find(rk => rk.toLowerCase() === k.toLowerCase());
+          if (ci && row[ci] != null && row[ci] !== '') return row[ci];
+          // 3. Accent-normalized exact
+          const normK = norm(k);
+          const na = rowKeys.find(rk => norm(rk) === normK);
+          if (na && row[na] != null && row[na] !== '') return row[na];
+          // 4. Partial contains (header contains key or key contains header)
+          const pc = rowKeys.find(rk => {
+            const nr = norm(rk);
+            return nr.includes(normK) || normK.includes(nr);
+          });
+          if (pc && row[pc] != null && row[pc] !== '') return row[pc];
+        }
+        return null;
+      };
+
+      // ── Format detection ─────────────────────────────────────────────────
+      const sampleRow = raw[0];
+      const allKeysNorm = Object.keys(sampleRow).map(k => norm(k));
+
+      const isUsageReport = allKeysNorm.some(k =>
+        k.includes('fim do total') || k.includes('uso do total') ||
+        (k.includes('equivalente') && k.includes('a4'))
+      );
+      const isSdsCav = !isUsageReport && allKeysNorm.some(k =>
+        k.includes('ciclos') || k.includes('mecanismo') || k.includes('uso de 30')
+      );
+
+      const newSdsData = new Map<string, any>();
+
+      // ════════════════════════════════════════════════════════════════════
+      if (isUsageReport) {
+        // ── Format 1: usage_report.xlsx ─────────────────────────────────
+        const groups = new Map<string, any[]>();
         raw.forEach((row: any) => {
-             const findVal = (keys: string[]) => {
-                for (const k of keys) {
-                    if (row[k]) return row[k];
-                    const upper = Object.keys(row).find(rk => rk.toUpperCase() === k.toUpperCase());
-                    if (upper) return row[upper];
-                }
-                return null;
-             };
+          const serial = findVal(row, ['Número de série', 'Numero de serie', 'Serial', 'Nº Série', 'Numero Serie']);
+          if (!serial) return;
+          const key = String(serial).trim().toUpperCase();
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push(row);
+        });
 
-             const serial = findVal(['Número de série', 'Numero de serie', 'Serial', 'Nº Série']);
-             const lastUpdate = findVal(['Ultima atualização', 'Última atualização', 'Last Update']);
-             const detection = findVal(['Data de detecção', 'Data detecção', 'Detection Date']);
+        groups.forEach((rows, key) => {
+          const annotated = rows.map(row => ({
+            row,
+            rawEnd:   parseDateRobust(findVal(row, ['Data da leitura final',   'Data leitura final',   'End Date'])),
+            rawStart: parseDateRobust(findVal(row, ['Data da leitura inicial', 'Data leitura inicial', 'Start Date'])),
+          })).sort((a, b) => {
+            if (!a.rawEnd && !b.rawEnd) return 0;
+            if (!a.rawEnd) return 1;
+            if (!b.rawEnd) return -1;
+            return b.rawEnd.getTime() - a.rawEnd.getTime();
+          });
 
-             if (serial) {
-                 const key = String(serial).trim().toUpperCase();
-                 newSdsData.set(key, {
-                     rawLastUpdate: parseDateRobust(lastUpdate),
-                     rawDetection: parseDateRobust(detection)
-                 });
-             }
+          const latest = annotated[0];
+
+          // Per-period details for descriptive duplicate display
+          const readingPeriods = annotated.map(a => ({
+            startDate: a.rawStart ? a.rawStart.toLocaleDateString('pt-BR') : '-',
+            endDate:   a.rawEnd   ? a.rawEnd.toLocaleDateString('pt-BR')   : '-',
+            usoTotal:  Number(findVal(a.row, ['Uso do total (equivalente A4)', 'Uso do total', 'Uso total'])) || 0,
+            fimTotal:  Number(findVal(a.row, ['Fim do total (equivalente A4)', 'Fim do total', 'Fim total'])) || 0,
+          }));
+
+          const counterUsoTotal = readingPeriods.reduce((s, p) => s + p.usoTotal, 0);
+          const counterUsoColor = rows.reduce((s, r) => s + (Number(findVal(r, ['Uso de coloridas (equivalente A4)', 'Uso de coloridas', 'Uso coloridas'])) || 0), 0);
+          const counterUsoMono  = rows.reduce((s, r) => s + (Number(findVal(r, ['Uso de monocromáticas (equivalente A4)', 'Uso de monocromaticas', 'Uso monocromaticas'])) || 0), 0);
+
+          const counterFimTotal = Number(findVal(latest.row, ['Fim do total (equivalente A4)', 'Fim do total', 'Fim total'])) || 0;
+          const counterFimColor = Number(findVal(latest.row, ['Fim de coloridas (equivalente A4)', 'Fim de coloridas', 'Fim coloridas'])) || 0;
+          const counterFimMono  = Number(findVal(latest.row, ['Fim de monocromáticas (equivalente A4)', 'Fim de monocromaticas', 'Fim monocromaticas'])) || 0;
+
+          newSdsData.set(key, {
+            rawLastUpdate:   latest.rawEnd,
+            rawDetection:    latest.rawStart,
+            isUsageReport:   true,
+            counterFimTotal, counterFimColor, counterFimMono,
+            counterUsoTotal, counterUsoColor, counterUsoMono,
+            readingPeriods,
+            readingCount:    rows.length,
+            sdsModel:        String(findVal(latest.row, ['Modelo'])          || '').trim(),
+            sdsManufacturer: String(findVal(latest.row, ['Fabricante'])       || '').trim(),
+            sdsZone:         String(findVal(latest.row, ['Zona'])             || '').trim(),
+            sdsIp:           String(findVal(latest.row, ['Endereço IP', 'IP']) || '').trim(),
+          });
+        });
+
+        setSdsData(newSdsData);
+        const multi = Array.from(newSdsData.values()).filter(r => (r.readingCount ?? 1) > 1).length;
+        alert(
+          `Relatório de Uso SDS carregado: ${newSdsData.size} equipamentos.\n` +
+          (multi > 0 ? `⚠ ${multi} dispositivos com múltiplas leituras de período.` : 'Sem leituras duplicadas.')
+        );
+
+      // ════════════════════════════════════════════════════════════════════
+      } else if (isSdsCav) {
+        // ── Format 2: SDS CAV.xlsx ───────────────────────────────────────
+        raw.forEach((row: any) => {
+          const serial = findVal(row, ['Número de série', 'Numero de serie', 'Serial', 'Nº Série']);
+          if (!serial) return;
+          const key = String(serial).trim().toUpperCase();
+          if (key === '—' || key === '-' || key === '') return;
+
+          newSdsData.set(key, {
+            rawLastUpdate:    parseDateRobust(findVal(row, ['Última atualização', 'Ultima atualizacao', 'Last Update', 'Ult. Atualização'])),
+            rawDetection:     parseDateRobust(findVal(row, ['Data de detecção',   'Data detecção',       'Detection Date'])),
+            isSdsCav:         true,
+            counterMecanismo: Number(findVal(row, ['Ciclos do mecanismo', 'Ciclos mecanismo', 'Mecanismo'])) || 0,
+            counterUso30:     Number(findVal(row, ['Uso de 30 dias', 'Uso 30 dias', 'Uso 30d']))              || 0,
+            sdsMonitorStatus: String(findVal(row, ['Status do monitor',    'Monitor Status'])  || '').trim(),
+            sdsSupplyStatus:  String(findVal(row, ['Status do SDS da HP', 'Status SDS', 'HP SDS Status']) || '').trim(),
+            sdsModel:         String(findVal(row, ['Modelo'])          || '').trim(),
+            sdsManufacturer:  String(findVal(row, ['Fabricante'])       || '').trim(),
+            sdsZone:          String(findVal(row, ['Zona'])             || '').trim(),
+            sdsIp:            String(findVal(row, ['Endereço IP', 'IP']) || '').trim(),
+          });
+        });
+
+        setSdsData(newSdsData);
+        alert(`Base SDS CAV carregada: ${newSdsData.size} equipamentos.`);
+
+      // ════════════════════════════════════════════════════════════════════
+      } else {
+        // ── Format 3: Classic SDS (Ultima atualização / Data de detecção) ─
+        raw.forEach((row: any) => {
+          const serial     = findVal(row, ['Número de série', 'Numero de serie', 'Serial', 'Nº Série']);
+          const lastUpdate = findVal(row, ['Ultima atualização', 'Última atualização', 'Last Update', 'Ult. Atualização']);
+          const detection  = findVal(row, ['Data de detecção', 'Data detecção', 'Detection Date', 'Data Detecção']);
+          if (!serial) return;
+          newSdsData.set(String(serial).trim().toUpperCase(), {
+            rawLastUpdate: parseDateRobust(lastUpdate),
+            rawDetection:  parseDateRobust(detection),
+          });
         });
         setSdsData(newSdsData);
         alert(`Base SDS carregada: ${newSdsData.size} registros.`);
+      }
+
     } catch (err) {
-        alert("Erro ao ler arquivo SDS");
-        console.error(err);
+      alert("Erro ao ler arquivo SDS");
+      console.error(err);
     } finally {
-        setIsProcessing(false);
-        if(sdsInputRef.current) sdsInputRef.current.value = '';
+      setIsProcessing(false);
+      if (sdsInputRef.current) sdsInputRef.current.value = '';
     }
   };
 
@@ -360,12 +558,14 @@ const App: React.FC = () => {
              };
 
              const serial = findVal(['Serial', 'Número de Série', 'Nº Série', 'Série', 'Numero de serie']);
-             const lastUpdate = findVal(['Last meter', 'Última leitura', 'Ultima leitura', 'Data Leitura', 'Ultimo medidor']);
+             const lastUpdateRaw = findVal(['Last meter', 'Última leitura', 'Ultima leitura', 'Data Leitura', 'Ultimo medidor']);
              const alertsStatus = findVal(['Alerts status', 'Status de Alerta', 'Status Alerta', 'Status de alertas']);
              const daysWithoutMeters = findVal(['Days without meters', 'Dias sem medidores', 'Dias sem leitura', 'Dias sem contadores']);
              const accountingStatusRaw = findVal(['Accounting status', 'Status Contabilização', 'Billing Status', 'Accounting Status']);
              const connectionTypeRaw = findVal(['Connection type', 'Tipo Conexão', 'Tipo de Conexão', 'Connection Type']);
              const mpsIpRaw = findVal(["Printer's address", "Printers address", 'IP Impressora', 'Endereco Impressora']);
+             const siteRaw = findVal(['Site', 'Site Name', 'Local']);
+             const departmentRaw = findVal(['Department', 'Departamento', 'Dept']);
 
              const accountingStatusMap: Record<string, string> = {
                  'BillingEnabled': 'Bilhetagem Ativa',
@@ -379,16 +579,28 @@ const App: React.FC = () => {
              const rawAccounting = String(accountingStatusRaw || '');
              const rawConnection = String(connectionTypeRaw || '');
 
+             // Always parse → format as DD/MM/YYYY (SheetJS may return Date objects)
+             const rawLastUpdate = parseDateRobust(lastUpdateRaw);
+             const formattedLastUpdate = rawLastUpdate ? rawLastUpdate.toLocaleDateString('pt-BR') : '-';
+
+             // Treat "Default site" (NDD placeholder) as empty
+             const siteVal = String(siteRaw || '').trim();
+             const deptVal  = String(departmentRaw || '').trim();
+             const site       = (siteVal && siteVal.toLowerCase() !== 'default site') ? siteVal : '';
+             const department = (deptVal && deptVal.toLowerCase() !== 'default') ? deptVal : '';
+
              if (serial) {
                  const key = String(serial).trim().toUpperCase();
                  newNddData.set(key, {
                      status: String(alertsStatus || 'Unknown'),
-                     lastUpdate: String(lastUpdate || '-'),
+                     lastUpdate: formattedLastUpdate,
                      daysWithoutMeters: String(daysWithoutMeters || '0'),
-                     rawLastUpdate: parseDateRobust(lastUpdate),
+                     rawLastUpdate,
                      accountingStatus: accountingStatusMap[rawAccounting] || rawAccounting || '-',
                      connectionType: connectionTypeMap[rawConnection] || rawConnection || '-',
                      mpsIp: String(mpsIpRaw || '-'),
+                     site,
+                     department,
                  });
              }
         });
@@ -875,6 +1087,9 @@ const App: React.FC = () => {
     const ufMap: Record<string, number> = {};
     const connMap: Record<string, number> = {};
 
+    // Global serial details map (powers KPI card drill-down)
+    const allSerialDetails: Record<string, any> = {};
+
     // Location breakdown maps (keyed by contrato and cidade)
     const locContratoMap = new Map<string, LocationBreakdown>();
     const locCityMap     = new Map<string, LocationBreakdown>();
@@ -974,7 +1189,32 @@ const App: React.FC = () => {
         loc.total++;
         if (item.serie && item.serie !== '-') {
           loc.serials.push(item.serie);
-          loc.serialDetails[item.serie] = { sdsStatus, nddStatus, billingStatus: itemBilling };
+          const sdsRec = sdsData.get(key);
+          const nddRec = nddData.get(key);
+          const corpKey2 = String(item.serie).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+          const corpRec = corpKey2 ? corporateData.get(corpKey2) : null;
+          loc.serialDetails[item.serie] = {
+            sdsStatus,
+            nddStatus,
+            billingStatus: itemBilling,
+            ip:               item.ip || nddRec?.mpsIp || '-',
+            hostname:         item.hostname || '-',
+            logradouro:       corpRec?.logradouro || '-',
+            bairro:           corpRec?.bairro || item.bairro || '-',
+            cidade:           corpRec?.cidade || item.cidade || '-',
+            uf:               corpRec?.uf || '-',
+            cep:              corpRec?.cep || '-',
+            modelo:           corpRec?.modelo || sdsRec?.sdsModel || '-',
+            lastSdsUpdate:    sdsRec?.rawLastUpdate ? sdsRec.rawLastUpdate.toLocaleDateString('pt-BR') : '-',
+            lastNddUpdate:    nddRec?.lastUpdate || '-',
+            billingStatusText: nddRec?.accountingStatus || '-',
+            counterValue:     sdsRec?.counterFimTotal ?? sdsRec?.counterMecanismo ?? null,
+            filial:           item.filial || '-',
+            site:             nddRec?.site || '',
+            department:       nddRec?.department || '',
+            inContract:       !!corpRec,
+          };
+          allSerialDetails[item.serie] = loc.serialDetails[item.serie];
         }
 
         if (sdsLoaded)  loc.sds[sdsStatus]++;
@@ -1037,6 +1277,7 @@ const App: React.FC = () => {
       connectionType: sortedTop(connMap, 5),
       locationsByContrato: finalizeLocs(locContratoMap, locContratoSit),
       locationsByCity:     finalizeLocs(locCityMap, locCitySit),
+      allSerialDetails,
       cepStats: corpLoaded ? (() => {
         const allCorp = Array.from(corporateData.values() as Iterable<CorporateInfo>);
         let valid = 0, invalid = 0, unchecked = 0;
@@ -1314,10 +1555,72 @@ const App: React.FC = () => {
       if (col.type === 'sds') {
           cellClass = 'border-r border-gray-100';
           if (col.key === 'status') {
-               val = sds.status;
-               cellClass += ` ${sds.colorClass}`;
+            // Status cell: label + multi-reading badge when usage_report
+            const multiReading = sds.isUsageReport && (sds.readingCount ?? 1) > 1;
+            let badgeTooltip = '';
+            if (multiReading && sds.readingPeriods && sds.readingPeriods.length > 1) {
+              const lines = sds.readingPeriods.map((p, i) =>
+                `${i + 1}. ${p.startDate} → ${p.endDate}: ${p.usoTotal.toLocaleString('pt-BR')} pgs (Contador: ${p.fimTotal.toLocaleString('pt-BR')})`
+              );
+              const acum = (sds.counterUsoTotal ?? 0).toLocaleString('pt-BR');
+              badgeTooltip = `${sds.readingCount} períodos de leitura:\n${lines.join('\n')}\nAcumulado total: ${acum} pgs`;
+            }
+            val = (
+              <div className="flex items-center gap-1 flex-wrap">
+                <span>{sds.status}</span>
+                {multiReading && (
+                  <span
+                    title={badgeTooltip}
+                    className="inline-flex items-center gap-0.5 text-[9px] font-bold bg-amber-100 text-amber-700 border border-amber-300 rounded-full px-1.5 py-0.5 leading-none cursor-help"
+                  >
+                    <svg className="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                    </svg>
+                    {sds.readingCount}×
+                  </span>
+                )}
+              </div>
+            );
+            cellClass += ` ${sds.colorClass}`;
           } else if (col.key === 'lastUpdate') val = sds.lastUpdate;
           else if (col.key === 'detection') val = sds.detection;
+          // Usage-report counter columns
+          else if (col.key === 'counterFimTotal') {
+            val = sds.counterFimTotal != null
+              ? sds.counterFimTotal.toLocaleString('pt-BR')
+              : '-';
+          } else if (col.key === 'counterUsoTotal') {
+            val = sds.counterUsoTotal != null
+              ? sds.counterUsoTotal.toLocaleString('pt-BR')
+              : '-';
+          } else if (col.key === 'counterFimColor') {
+            val = sds.counterFimColor != null
+              ? sds.counterFimColor.toLocaleString('pt-BR')
+              : '-';
+          }
+          // SDS CAV counter columns
+          else if (col.key === 'counterMecanismo') {
+            val = sds.counterMecanismo != null
+              ? sds.counterMecanismo.toLocaleString('pt-BR')
+              : '-';
+          } else if (col.key === 'counterUso30') {
+            val = sds.counterUso30 != null
+              ? sds.counterUso30.toLocaleString('pt-BR')
+              : '-';
+          } else if (col.key === 'sdsSupplyStatus') {
+            val = sds.sdsSupplyStatus || '-';
+            if (sds.sdsSupplyStatus) {
+              const s = sds.sdsSupplyStatus.toLowerCase();
+              if (s.includes('ok') || s.includes('normal') || s.includes('bom'))
+                cellClass += ' bg-green-50 text-green-700 font-semibold';
+              else if (s.includes('alerta') || s.includes('baixo') || s.includes('atenção'))
+                cellClass += ' bg-yellow-50 text-yellow-700 font-semibold';
+              else if (s.includes('critico') || s.includes('crítico') || s.includes('vazio') || s.includes('esgotado'))
+                cellClass += ' bg-red-50 text-red-700 font-semibold';
+            }
+          } else if (col.key === 'sdsModel') {
+            val = sds.sdsModel || '-';
+          }
       } else if (col.type === 'ndd') {
           cellClass = 'border-r border-gray-100';
           if (col.key === 'status') {

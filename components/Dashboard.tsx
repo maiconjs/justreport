@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import {
   PieChart, Pie, Cell, Tooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -13,6 +14,23 @@ export interface SerialDetail {
   sdsStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData';
   nddStatus: 'monitored' | 'alert' | 'notMonitored' | 'noData';
   billingStatus: 'active' | 'noRecent' | 'never' | null;
+  inContract: boolean;
+  // Extended detail fields for table/export
+  ip?: string;
+  hostname?: string;
+  logradouro?: string;
+  bairro?: string;
+  cidade?: string;
+  uf?: string;
+  cep?: string;
+  modelo?: string;
+  lastSdsUpdate?: string;
+  lastNddUpdate?: string;
+  billingStatusText?: string;
+  counterValue?: number | null;
+  filial?: string;
+  site?: string;
+  department?: string;
 }
 
 export interface LocationBreakdown {
@@ -52,6 +70,7 @@ export interface DashboardStats {
   connectionType: StatEntry[];
   locationsByContrato: LocationBreakdown[];
   locationsByCity: LocationBreakdown[];
+  allSerialDetails: Record<string, SerialDetail>;
 }
 
 // ── Color palette ─────────────────────────────────────────────────────────────
@@ -225,10 +244,15 @@ interface KpiCardProps {
   bgClass: string;
   icon: React.ReactNode;
   healthBar?: HealthBarProps;
+  onClick?: () => void;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub, bgClass, icon, healthBar }) => (
-  <div className={`rounded-xl p-4 flex flex-col shadow-sm ${bgClass}`}>
+const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub, bgClass, icon, healthBar, onClick }) => (
+  <div
+    className={`rounded-xl p-4 flex flex-col shadow-sm ${bgClass} ${onClick ? 'cursor-pointer hover:brightness-110 hover:shadow-md active:scale-[.98] transition-all' : ''}`}
+    onClick={onClick}
+    role={onClick ? 'button' : undefined}
+  >
     <div className="flex items-center gap-3 mb-2">
       <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-white/20 flex items-center justify-center text-white">
         {icon}
@@ -405,6 +429,13 @@ interface LocationDetailModalProps {
 
 const PAGE_SIZE = 50;
 
+const SDS_LABEL: Record<string, string> = {
+  monitored: 'Monitorado', alert: 'Alerta', notMonitored: 'Não Monitorado', noData: '-',
+};
+const NDD_LABEL: Record<string, string> = {
+  monitored: 'Monitorado', alert: 'Alerta', notMonitored: 'Não Monitorado', noData: '-',
+};
+
 const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoaded, nddLoaded, onClose }) => {
   const [sdsFilter, setSdsFilter]         = useState<'all' | 'monitored' | 'alert' | 'notMonitored'>('all');
   const [nddFilter, setNddFilter]         = useState<'all' | 'monitored' | 'alert' | 'notMonitored'>('all');
@@ -415,6 +446,9 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
   const [search, setSearch]               = useState('');
   const [page, setPage]                   = useState(1);
   const [showDuplicatesOnly, setShowDuplicatesOnly] = useState(false);
+  const [viewMode, setViewMode]           = useState<'chips' | 'table'>('chips');
+  const [tableSortKey, setTableSortKey]   = useState('serie');
+  const [tableSortDir, setTableSortDir]   = useState<'asc' | 'desc'>('asc');
 
   // Reset all state when the location changes
   useEffect(() => {
@@ -427,6 +461,7 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
     setSearch('');
     setPage(1);
     setShowDuplicatesOnly(false);
+    setViewMode('chips');
   }, [loc?.name]);
 
   const uniqueSerials = useMemo(() => (loc ? [...new Set(loc.serials)] : []), [loc]);
@@ -465,6 +500,97 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
   const clearFilters = () => {
     setSdsFilter('all'); setNddFilter('all'); setBillingFilter('all');
     setSearch(''); setPage(1);
+  };
+
+  const sortedTableRows = useMemo(() => {
+    if (!loc) return [];
+    const rows = filteredSerials.map(s => ({ serial: s, ...(loc.serialDetails?.[s] || {}) }));
+    return rows.sort((a, b) => {
+      let va: string | number = '';
+      let vb: string | number = '';
+      switch (tableSortKey) {
+        case 'serie':      va = a.serial;              vb = b.serial;              break;
+        case 'modelo':     va = a.modelo || '';         vb = b.modelo || '';        break;
+        case 'cidade':     va = a.cidade || '';         vb = b.cidade || '';        break;
+        case 'uf':         va = a.uf || '';             vb = b.uf || '';            break;
+        case 'bairro':     va = a.bairro || '';         vb = b.bairro || '';        break;
+        case 'sds':        va = a.sdsStatus || '';      vb = b.sdsStatus || '';     break;
+        case 'ndd':        va = a.nddStatus || '';      vb = b.nddStatus || '';     break;
+        case 'billing':    va = a.billingStatus || '';  vb = b.billingStatus || ''; break;
+        case 'counter':    va = a.counterValue ?? -1;   vb = b.counterValue ?? -1;  break;
+        case 'lastSds':    va = a.lastSdsUpdate || '';  vb = b.lastSdsUpdate || ''; break;
+        case 'lastNdd':    va = a.lastNddUpdate || '';  vb = b.lastNddUpdate || ''; break;
+        case 'site':       va = a.site || '';           vb = b.site || '';          break;
+        case 'department': va = a.department || '';     vb = b.department || '';    break;
+        default: break;
+      }
+      if (va < vb) return tableSortDir === 'asc' ? -1 : 1;
+      if (va > vb) return tableSortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [filteredSerials, loc, tableSortKey, tableSortDir]);
+
+  // Detect if Site / Department are populated for this location
+  const hasSite = useMemo(() =>
+    sortedTableRows.some(r => r.site && r.site.trim() !== ''),
+  [sortedTableRows]);
+  const hasDepartment = useMemo(() =>
+    sortedTableRows.some(r => r.department && r.department.trim() !== ''),
+  [sortedTableRows]);
+
+  const handleTableSort = (key: string) => {
+    if (tableSortKey === key) setTableSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setTableSortKey(key); setTableSortDir('asc'); }
+  };
+
+  const exportData = (format: 'csv' | 'xlsx') => {
+    if (!loc) return;
+    const rows = sortedTableRows.map(r => {
+      const base: Record<string, string | number> = {
+        'Série':               r.serial,
+        'Modelo':              r.modelo || '-',
+        'Filial':              r.filial || '-',
+        'Logradouro':          r.logradouro || '-',
+        'Bairro':              r.bairro || '-',
+        'Cidade':              r.cidade || '-',
+        'UF':                  r.uf || '-',
+        'CEP':                 r.cep || '-',
+        'IP':                  r.ip || '-',
+        'Hostname':            r.hostname || '-',
+        'SDS':                 SDS_LABEL[r.sdsStatus] || '-',
+        'Últ. Atualiz. SDS':   r.lastSdsUpdate || '-',
+        'Contador':            r.counterValue != null ? r.counterValue : '-',
+        'MPS':                 NDD_LABEL[r.nddStatus] || '-',
+        'Últ. Atualiz. MPS':   r.lastNddUpdate || '-',
+        'Bilhetagem':          r.billingStatusText || '-',
+      };
+      if (hasSite)       base['Site']       = r.site       || '-';
+      if (hasDepartment) base['Departamento'] = r.department || '-';
+      return base;
+    });
+
+    const fileName = `${loc.name.replace(/[^a-zA-Z0-9]/g, '_')}_localidade`;
+
+    if (format === 'xlsx') {
+      const ws = XLSX.utils.json_to_sheet(rows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Dispositivos');
+      XLSX.writeFile(wb, `${fileName}.xlsx`);
+    } else {
+      const headers = Object.keys(rows[0] || {});
+      const csvLines = [
+        '\uFEFF' + headers.join(';'),
+        ...rows.map(r => headers.map(h => {
+          const v = String((r as any)[h] ?? '').replace(/"/g, '""');
+          return v.includes(';') || v.includes('\n') ? `"${v}"` : v;
+        }).join(';')),
+      ];
+      const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = `${fileName}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    }
   };
 
   const toggleSds = (s: 'monitored' | 'alert' | 'notMonitored') => {
@@ -512,7 +638,7 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
       onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl max-h-[92vh] flex flex-col animate-fade-in-up">
+      <div className={`bg-white rounded-2xl shadow-2xl w-full max-h-[92vh] flex flex-col animate-fade-in-up transition-all duration-300 ${viewMode === 'table' ? 'w-[96vw]' : 'max-w-3xl'}`}>
 
         {/* ── Header ── */}
         <div className="px-6 py-4 border-b border-gray-100 flex items-start justify-between flex-shrink-0">
@@ -594,6 +720,8 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
 
         {/* ── Scrollable body ── */}
         <div className="overflow-y-auto flex-grow px-6 py-4 space-y-5 custom-scrollbar">
+
+          <div>
 
           {/* Monitoring charts */}
           {(sdsLoaded || nddLoaded) && (showSds || showNdd) && (
@@ -688,13 +816,15 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
             </div>
           )}
 
-          {/* ── Serial list with search + pagination ── */}
+          </div>
+
+          {/* ── Serial list / detail table ── */}
           {uniqueSerials.length > 0 && (
             <div>
-              {/* List header */}
+              {/* Header row: title + search + view toggle + export */}
               <div className="flex items-center justify-between gap-2 mb-3 flex-wrap gap-y-2">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wide">Seriais</div>
+                  <div className="text-xs font-bold text-gray-500 uppercase tracking-wide">Dispositivos</div>
                   <span className="text-[10px] text-gray-400">
                     {hasFilters
                       ? `${filteredSerials.length} de ${uniqueSerials.length}`
@@ -706,25 +836,61 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
                     </span>
                   )}
                 </div>
-                {/* Search input */}
-                <div className="relative">
-                  <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                  </svg>
-                  <input
-                    type="text"
-                    value={search}
-                    onChange={e => { setSearch(e.target.value); setPage(1); }}
-                    placeholder="Buscar serial..."
-                    className="pl-6 pr-6 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 w-40"
-                  />
-                  {search && (
-                    <button onClick={() => { setSearch(''); setPage(1); }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
-                      </svg>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Search */}
+                  <div className="relative">
+                    <svg className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input
+                      type="text"
+                      value={search}
+                      onChange={e => { setSearch(e.target.value); setPage(1); }}
+                      placeholder="Buscar serial..."
+                      className="pl-6 pr-6 py-1.5 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-200 w-36"
+                    />
+                    {search && (
+                      <button onClick={() => { setSearch(''); setPage(1); }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/>
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                  {/* View toggle */}
+                  <div className="flex rounded-lg overflow-hidden border border-gray-200 text-[10px] font-bold">
+                    <button
+                      onClick={() => setViewMode('chips')}
+                      className={`px-2.5 py-1.5 transition-colors ${viewMode === 'chips' ? 'bg-blue-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}>
+                      Seriais
                     </button>
+                    <button
+                      onClick={() => setViewMode('table')}
+                      className={`px-2.5 py-1.5 transition-colors border-l border-gray-200 ${viewMode === 'table' ? 'bg-blue-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}`}>
+                      Tabela
+                    </button>
+                  </div>
+                  {/* Export buttons — only in table mode */}
+                  {viewMode === 'table' && filteredSerials.length > 0 && (
+                    <div className="flex gap-1">
+                      <button
+                        onClick={() => exportData('xlsx')}
+                        className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-colors">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                        </svg>
+                        XLSX
+                      </button>
+                      <button
+                        onClick={() => exportData('csv')}
+                        className="flex items-center gap-1 px-2.5 py-1.5 text-[10px] font-bold bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                        </svg>
+                        CSV
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -733,7 +899,7 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
                 <div className="text-center py-8 text-xs text-gray-400 italic bg-gray-50 rounded-xl">
                   Nenhum serial corresponde aos filtros ativos.
                 </div>
-              ) : (
+              ) : viewMode === 'chips' ? (
                 <>
                   <div className="flex flex-wrap gap-1.5">
                     {pageSerials.map((s, i) => {
@@ -741,8 +907,8 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
                       return (
                         <span key={i}
                           className={`px-2 py-0.5 rounded text-[10px] font-mono cursor-default relative transition-colors ${
-                            isDup 
-                              ? 'bg-amber-100/70 text-amber-800 border border-amber-300 shadow-sm pr-6' 
+                            isDup
+                              ? 'bg-amber-100/70 text-amber-800 border border-amber-300 shadow-sm pr-6'
                               : 'bg-gray-100 hover:bg-gray-200 text-gray-700'
                           }`}>
                           {s}
@@ -751,41 +917,111 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
                       );
                     })}
                   </div>
-
-                  {/* Pagination */}
                   {totalPages > 1 && (
                     <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
-                      <button
-                        onClick={() => setPage(p => Math.max(1, p - 1))}
-                        disabled={safePage === 1}
+                      <button onClick={() => setPage(p => Math.max(1, p - 1))} disabled={safePage === 1}
                         className="px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                         ← Anterior
                       </button>
-
                       <div className="flex items-center gap-1">
                         {getPageNumbers(safePage, totalPages).map((p, i) =>
                           p === null ? (
                             <span key={`sep-${i}`} className="w-7 text-center text-xs text-gray-400">…</span>
                           ) : (
                             <button key={p} onClick={() => setPage(p)}
-                              className={`w-7 h-7 text-xs font-bold rounded-lg transition-colors ${
-                                safePage === p ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'
-                              }`}>
+                              className={`w-7 h-7 text-xs font-bold rounded-lg transition-colors ${safePage === p ? 'bg-blue-600 text-white' : 'text-gray-500 hover:bg-gray-100'}`}>
                               {p}
                             </button>
                           )
                         )}
                       </div>
-
-                      <button
-                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                        disabled={safePage === totalPages}
+                      <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={safePage === totalPages}
                         className="px-3 py-1.5 text-xs font-bold text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
                         Próximo →
                       </button>
                     </div>
                   )}
                 </>
+              ) : (
+                /* ── Detail table ── */
+                <div className="rounded-xl border border-gray-200 shadow-sm"
+                  style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: '55vh' }}>
+                  <table className="text-[11px] border-collapse" style={{ width: '100%', minWidth: 'max-content' }}>
+                    <thead className="sticky top-0 z-20">
+                      <tr className="bg-gray-50 border-b border-gray-200">
+                        {[
+                          { key: 'serie',      label: 'Série',       sticky: true  },
+                          { key: 'modelo',     label: 'Modelo',      sticky: false },
+                          { key: 'filial',     label: 'Filial',      sticky: false },
+                          { key: 'logradouro', label: 'Logradouro',  sticky: false },
+                          { key: 'bairro',     label: 'Bairro',      sticky: false },
+                          { key: 'cidade',     label: 'Cidade',      sticky: false },
+                          { key: 'uf',         label: 'UF',          sticky: false },
+                          { key: 'cep',        label: 'CEP',         sticky: false },
+                          { key: 'ip',         label: 'IP',          sticky: false },
+                          { key: 'hostname',   label: 'Hostname',    sticky: false },
+                          ...(hasSite       ? [{ key: 'site',       label: 'Site',        sticky: false }] : []),
+                          ...(hasDepartment ? [{ key: 'department', label: 'Departamento', sticky: false }] : []),
+                          { key: 'sds',        label: 'SDS',         sticky: false },
+                          { key: 'lastSds',    label: 'Últ. SDS',    sticky: false },
+                          { key: 'counter',    label: 'Contador',    sticky: false },
+                          { key: 'ndd',        label: 'MPS',         sticky: false },
+                          { key: 'lastNdd',    label: 'Últ. MPS',    sticky: false },
+                          { key: 'billing',    label: 'Bilhetagem',  sticky: false },
+                        ].map(col => (
+                          <th
+                            key={col.key}
+                            onClick={() => handleTableSort(col.key)}
+                            className={`px-3 py-2 text-left font-bold text-gray-600 uppercase tracking-wide cursor-pointer select-none whitespace-nowrap hover:bg-gray-100 transition-colors bg-gray-50 ${col.sticky ? 'sticky left-0 z-30 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.1)]' : ''}`}>
+                            <span className="flex items-center gap-1">
+                              {col.label}
+                              {tableSortKey === col.key
+                                ? <span className="text-blue-500">{tableSortDir === 'asc' ? '↑' : '↓'}</span>
+                                : <span className="text-gray-300">↕</span>
+                              }
+                            </span>
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedTableRows.map((r, i) => {
+                        const sdsColor  = r.sdsStatus === 'monitored' ? 'bg-green-100 text-green-800' : r.sdsStatus === 'alert' ? 'bg-yellow-100 text-yellow-800' : r.sdsStatus === 'notMonitored' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-500';
+                        const nddColor  = r.nddStatus === 'monitored' ? 'bg-green-100 text-green-800' : r.nddStatus === 'alert' ? 'bg-yellow-100 text-yellow-800' : r.nddStatus === 'notMonitored' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-500';
+                        const billColor = r.billingStatus === 'active' ? 'bg-green-100 text-green-800' : r.billingStatus === 'noRecent' ? 'bg-yellow-100 text-yellow-800' : r.billingStatus === 'never' ? 'bg-red-100 text-red-800' : 'bg-gray-100 text-gray-400';
+                        const isDup = duplicates.includes(r.serial);
+                        return (
+                          <tr key={r.serial} className={`border-b border-gray-100 hover:bg-blue-50/40 transition-colors ${i % 2 === 0 ? '' : 'bg-gray-50/30'}`}>
+                            {/* Serial — sticky */}
+                            <td className="px-3 py-2 sticky left-0 z-10 bg-white font-mono font-semibold text-gray-800 shadow-[2px_0_4px_-2px_rgba(0,0,0,0.08)] whitespace-nowrap">
+                              <span className="flex items-center gap-1">
+                                {r.serial}
+                                {isDup && <span className="text-[8px] font-bold bg-amber-400 text-white px-1 rounded-full">x2+</span>}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-700">{r.modelo || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.filial || '-'}</td>
+                            <td className="px-3 py-2" style={{ minWidth: 180 }}><div className="truncate text-gray-700" style={{ maxWidth: 220 }} title={r.logradouro}>{r.logradouro || '-'}</div></td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.bairro || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-700 font-medium">{r.cidade || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.uf || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap font-mono text-gray-600">{r.cep || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap font-mono text-gray-600">{r.ip || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600" style={{ minWidth: 120 }}><div className="truncate" style={{ maxWidth: 160 }} title={r.hostname}>{r.hostname || '-'}</div></td>
+                            {hasSite       && <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.site || '-'}</td>}
+                            {hasDepartment && <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.department || '-'}</td>}
+                            <td className="px-3 py-2 whitespace-nowrap"><span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${sdsColor}`}>{SDS_LABEL[r.sdsStatus] || '-'}</span></td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.lastSdsUpdate || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap text-right text-gray-700 font-mono">{r.counterValue != null ? r.counterValue.toLocaleString('pt-BR') : '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap"><span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${nddColor}`}>{NDD_LABEL[r.nddStatus] || '-'}</span></td>
+                            <td className="px-3 py-2 whitespace-nowrap text-gray-600">{r.lastNddUpdate || '-'}</td>
+                            <td className="px-3 py-2 whitespace-nowrap"><span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${billColor}`}>{r.billingStatusText || '-'}</span></td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           )}
@@ -806,6 +1042,91 @@ const LocationDetailModal: React.FC<LocationDetailModalProps> = ({ loc, sdsLoade
         </div>
       </div>
     </div>
+  );
+};
+
+// ── CardFilterModal ───────────────────────────────────────────────────────────
+
+type CardFilterKey =
+  | 'total' | 'sdsMonitored' | 'sdsAlert' | 'sdsNotMonitored'
+  | 'mpsMonitored' | 'mpsNotMonitored' | 'billingActive' | 'billingNoRecent' | 'billingNever'
+  | 'inContract' | 'outOfContract';
+
+const CARD_FILTER_LABEL: Record<CardFilterKey, string> = {
+  total:           'Todos os Equipamentos',
+  sdsMonitored:    'SDS Monitorados',
+  sdsAlert:        'SDS em Alerta',
+  sdsNotMonitored: 'SDS Não Monitorados',
+  mpsMonitored:    'MPS Monitorados',
+  mpsNotMonitored: 'MPS Não Monitorados',
+  billingActive:   'Bilhetagem Ativa',
+  billingNoRecent: 'Sem Bilhetagem Recente',
+  billingNever:    'Nunca Bilhetado',
+  inContract:      'Em Contrato',
+  outOfContract:   'Fora do Contrato',
+};
+
+interface CardFilterModalProps {
+  filterKey: CardFilterKey | null;
+  allSerialDetails: Record<string, SerialDetail>;
+  sdsLoaded: boolean;
+  nddLoaded: boolean;
+  onClose: () => void;
+}
+
+const CardFilterModal: React.FC<CardFilterModalProps> = ({ filterKey, allSerialDetails, sdsLoaded, nddLoaded, onClose }) => {
+  const syntheticLoc = useMemo((): LocationBreakdown | null => {
+    if (!filterKey) return null;
+
+    const entries = Object.entries(allSerialDetails);
+    const filtered = entries.filter(([, d]) => {
+      switch (filterKey) {
+        case 'total':           return true;
+        case 'sdsMonitored':    return d.sdsStatus === 'monitored';
+        case 'sdsAlert':        return d.sdsStatus === 'alert';
+        case 'sdsNotMonitored': return d.sdsStatus === 'notMonitored';
+        case 'mpsMonitored':    return d.nddStatus === 'monitored';
+        case 'mpsNotMonitored': return d.nddStatus === 'notMonitored';
+        case 'billingActive':   return d.billingStatus === 'active';
+        case 'billingNoRecent': return d.billingStatus === 'noRecent';
+        case 'billingNever':    return d.billingStatus === 'never';
+        case 'inContract':      return d.inContract === true;
+        case 'outOfContract':   return d.inContract === false;
+        default: return false;
+      }
+    });
+
+    const serials = filtered.map(([s]) => s);
+    const serialDetails = Object.fromEntries(filtered);
+    const sds  = { monitored: 0, alert: 0, notMonitored: 0, noData: 0 };
+    const ndd  = { monitored: 0, alert: 0, notMonitored: 0, noData: 0 };
+    const bill = { active: 0, noRecent: 0, never: 0 };
+
+    filtered.forEach(([, d]) => {
+      sds[d.sdsStatus]++;
+      ndd[d.nddStatus]++;
+      if (d.billingStatus) bill[d.billingStatus]++;
+    });
+
+    return {
+      name: CARD_FILTER_LABEL[filterKey],
+      total: serials.length,
+      sds,
+      ndd,
+      billing: bill,
+      situacao: [],
+      serials,
+      serialDetails,
+    };
+  }, [filterKey, allSerialDetails]);
+
+  return (
+    <LocationDetailModal
+      loc={syntheticLoc}
+      sdsLoaded={sdsLoaded}
+      nddLoaded={nddLoaded}
+      onClose={onClose}
+    />
   );
 };
 
@@ -1098,6 +1419,7 @@ interface Props {
 
 export const Dashboard: React.FC<Props> = ({ stats }) => {
   const [selectedLocation, setSelectedLocation] = useState<LocationBreakdown | null>(null);
+  const [activeCardFilter, setActiveCardFilter] = useState<CardFilterKey | null>(null);
   const [locationGroupBy, setLocationGroupBy] = useState<'contrato' | 'cidade'>('contrato');
   const [locationView, setLocationView]         = useState<'cards' | 'table'>('cards');
   const [showAllLocations, setShowAllLocations] = useState(false);
@@ -1165,6 +1487,15 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
         onClose={() => setSelectedLocation(null)}
       />
 
+      {/* KPI card drill-down modal */}
+      <CardFilterModal
+        filterKey={activeCardFilter}
+        allSerialDetails={stats.allSerialDetails}
+        sdsLoaded={stats.sdsLoaded}
+        nddLoaded={stats.nddLoaded}
+        onClose={() => setActiveCardFilter(null)}
+      />
+
       <div className="flex-grow overflow-auto custom-scrollbar bg-gray-50">
         <div className="p-4 max-w-screen-2xl mx-auto space-y-4">
 
@@ -1184,6 +1515,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
               sub="registros filtrados"
               bgClass="bg-gradient-to-br from-blue-600 to-indigo-700"
               icon={Ico.equip}
+              onClick={() => setActiveCardFilter('total')}
             />
 
             {stats.sdsLoaded ? (
@@ -1195,6 +1527,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-emerald-500 to-green-600"
                   icon={Ico.check}
                   healthBar={{ monitored: stats.sds.monitored, alert: stats.sds.alert, notMonitored: stats.sds.notMonitored, noData: stats.sds.incomplete, total: totalSds }}
+                  onClick={() => setActiveCardFilter('sdsMonitored')}
                 />
                 <KpiCard
                   label="SDS em Alerta"
@@ -1203,6 +1536,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-amber-500 to-orange-600"
                   icon={Ico.warn}
                   healthBar={{ monitored: stats.sds.monitored, alert: stats.sds.alert, notMonitored: stats.sds.notMonitored, noData: stats.sds.incomplete, total: totalSds }}
+                  onClick={() => setActiveCardFilter('sdsAlert')}
                 />
                 <KpiCard
                   label="SDS Não Monitorados"
@@ -1211,6 +1545,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-red-500 to-rose-700"
                   icon={Ico.off}
                   healthBar={{ monitored: stats.sds.monitored, alert: stats.sds.alert, notMonitored: stats.sds.notMonitored, noData: stats.sds.incomplete, total: totalSds }}
+                  onClick={() => setActiveCardFilter('sdsNotMonitored')}
                 />
               </>
             ) : (
@@ -1228,6 +1563,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-teal-500 to-cyan-600"
                   icon={Ico.star}
                   healthBar={{ monitored: stats.ndd.monitored, alert: stats.ndd.alert, notMonitored: stats.ndd.notMonitored, noData: 0, total: totalNdd }}
+                  onClick={() => setActiveCardFilter('mpsMonitored')}
                 />
                 <KpiCard
                   label="MPS Não Monitorados"
@@ -1236,6 +1572,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-rose-500 to-pink-700"
                   icon={Ico.off}
                   healthBar={{ monitored: stats.ndd.monitored, alert: stats.ndd.alert, notMonitored: stats.ndd.notMonitored, noData: 0, total: totalNdd }}
+                  onClick={() => setActiveCardFilter('mpsNotMonitored')}
                 />
                 <KpiCard
                   label="Bilhetagem Ativa"
@@ -1244,6 +1581,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   bgClass="bg-gradient-to-br from-violet-500 to-purple-700"
                   icon={Ico.bill}
                   healthBar={{ monitored: stats.billing.active, alert: stats.billing.noRecent, notMonitored: stats.billing.never, noData: stats.total - billingTotal, total: stats.total }}
+                  onClick={() => setActiveCardFilter('billingActive')}
                 />
               </>
             ) : (
@@ -1260,6 +1598,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   sub={pct(stats.corp.inContract, stats.total)}
                   bgClass="bg-gradient-to-br from-amber-500 to-yellow-600"
                   icon={Ico.contract}
+                  onClick={() => setActiveCardFilter('inContract')}
                 />
                 <KpiCard
                   label="Fora do Contrato"
@@ -1267,6 +1606,7 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   sub="sem match no contrato"
                   bgClass="bg-gradient-to-br from-slate-500 to-gray-700"
                   icon={Ico.off}
+                  onClick={() => setActiveCardFilter('outOfContract')}
                 />
               </>
             ) : (

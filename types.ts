@@ -22,6 +22,14 @@ export interface ReportItem {
   [key: string]: any;
 }
 
+/** One reading period — used to describe multi-period duplicates in usage_report */
+export interface SdsReadingPeriod {
+  startDate: string;  // DD/MM/YYYY
+  endDate:   string;
+  usoTotal:  number;  // pages consumed in this period
+  fimTotal:  number;  // cumulative counter at end of period
+}
+
 export interface SdsInfo {
   status: 'Monitorado' | 'Alerta' | 'Não Monitorado' | 'Dados Incompletos' | '-';
   colorClass: string;
@@ -29,6 +37,28 @@ export interface SdsInfo {
   detection: string;
   rawLastUpdate: Date | null;
   rawDetection: Date | null;
+
+  // ── usage_report.xlsx ────────────────────────────────────────────────────
+  isUsageReport?: boolean;
+  counterFimTotal?: number;   // Fim do total (equivalente A4)
+  counterFimColor?: number;   // Fim de coloridas (equivalente A4)
+  counterFimMono?:  number;   // Fim de monocromáticas (equivalente A4)
+  counterUsoTotal?: number;   // Accumulated usage across all reading periods
+  counterUsoColor?: number;
+  counterUsoMono?:  number;
+  readingPeriods?:  SdsReadingPeriod[];  // Detail for each period (duplicate description)
+
+  // ── SDS CAV.xlsx ─────────────────────────────────────────────────────────
+  isSdsCav?: boolean;
+  counterMecanismo?: number;  // Ciclos do mecanismo (cumulative mechanism counter)
+  counterUso30?:     number;  // Uso de 30 dias (rolling 30-day usage)
+  sdsMonitorStatus?: string;  // Status do monitor
+  sdsSupplyStatus?:  string;  // Status do SDS da HP (supply/consumables)
+
+  // ── Shared ───────────────────────────────────────────────────────────────
+  sdsModel?:        string;
+  sdsManufacturer?: string;
+  readingCount?:    number;   // >1 = multiple reading periods (usage_report only)
 }
 
 export interface NddInfo {
