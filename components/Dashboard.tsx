@@ -1423,6 +1423,19 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
   const [locationGroupBy, setLocationGroupBy] = useState<'contrato' | 'cidade'>('contrato');
   const [locationView, setLocationView]         = useState<'cards' | 'table'>('cards');
   const [showAllLocations, setShowAllLocations] = useState(false);
+  const [selectedColors, setSelectedColors] = useState<('green' | 'yellow' | 'red')[]>(['green', 'yellow', 'red']);
+
+  const getLocColor = (loc: LocationBreakdown): 'green' | 'yellow' | 'red' => {
+    const sdsKnown = loc.total - loc.sds.noData;
+    const sdsRate  = sdsKnown > 0 ? Math.round(loc.sds.monitored / sdsKnown * 100) : null;
+    const nddKnown = loc.total - loc.ndd.noData;
+    const nddRate  = nddKnown > 0 ? Math.round(loc.ndd.monitored / nddKnown * 100) : null;
+    const health = sdsRate ?? nddRate ?? 100;
+    
+    if (health >= 80) return 'green';
+    if (health >= 50) return 'yellow';
+    return 'red';
+  };
 
   // ── Empty state ────────────────────────────────────────────────────────────
   if (stats.total === 0) {
@@ -1472,7 +1485,11 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
   const billingTotal = stats.billing.active + stats.billing.noRecent + stats.billing.never;
   const pct = (n: number, t: number) => t > 0 ? `${Math.round(n / t * 100)}% de ${t} registros` : '';
 
-  const locations = locationGroupBy === 'contrato' ? stats.locationsByContrato : stats.locationsByCity;
+  const allLocationsForGroup = locationGroupBy === 'contrato' ? stats.locationsByContrato : stats.locationsByCity;
+  const locations = useMemo(() => {
+    return allLocationsForGroup.filter(loc => selectedColors.includes(getLocColor(loc)));
+  }, [allLocationsForGroup, selectedColors]);
+
   const visibleLocations = showAllLocations ? locations : locations.slice(0, 18);
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -1617,11 +1634,34 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
           </div>
 
           {/* ── Location / Contract Cards or Table ── */}
-          {locations.length > 0 && (
+          {allLocationsForGroup.length > 0 && (
             <ChartCard
               title={`Visão por ${locationGroupBy === 'contrato' ? 'Contrato' : 'Cidade'}`}
               action={
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  {/* Color Filters */}
+                  <div className="flex items-center gap-2 bg-gray-100 rounded-lg p-0.5 px-2">
+                    <span className="text-[9px] font-bold text-gray-500 uppercase">Filtro:</span>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={selectedColors.includes('green')} onChange={(e) => {
+                        setSelectedColors(prev => e.target.checked ? [...prev, 'green'] : prev.filter(c => c !== 'green'))
+                      }} className="w-3 h-3 accent-emerald-500" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 shadow-sm" title="Monitorado (>= 80%)"></span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={selectedColors.includes('yellow')} onChange={(e) => {
+                        setSelectedColors(prev => e.target.checked ? [...prev, 'yellow'] : prev.filter(c => c !== 'yellow'))
+                      }} className="w-3 h-3 accent-amber-500" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-500 shadow-sm" title="Atenção (50% a 79%)"></span>
+                    </label>
+                    <label className="flex items-center gap-1 cursor-pointer">
+                      <input type="checkbox" checked={selectedColors.includes('red')} onChange={(e) => {
+                        setSelectedColors(prev => e.target.checked ? [...prev, 'red'] : prev.filter(c => c !== 'red'))
+                      }} className="w-3 h-3 accent-red-500" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500 shadow-sm" title="Crítico (< 50%)"></span>
+                    </label>
+                  </div>
+
                   {/* Group-by toggle */}
                   <div className="flex items-center gap-0.5 bg-gray-100 rounded-lg p-0.5">
                     {(['contrato', 'cidade'] as const).map(g => (
@@ -1671,6 +1711,10 @@ export const Dashboard: React.FC<Props> = ({ stats }) => {
                   nddLoaded={stats.nddLoaded}
                   onRowClick={loc => setSelectedLocation(loc)}
                 />
+              ) : locations.length === 0 ? (
+                <div className="text-center py-10 text-xs text-gray-400 italic bg-gray-50 rounded-xl">
+                  Nenhuma localidade corresponde às cores filtradas.
+                </div>
               ) : (
                 <>
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
